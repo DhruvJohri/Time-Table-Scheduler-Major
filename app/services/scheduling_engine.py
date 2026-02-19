@@ -495,7 +495,24 @@ class SchedulingEngine:
 
     @staticmethod
     def _add_more_focus(timetable: List[Dict]) -> List[Dict]:
-        """More focus: longer study blocks, minimal distractions\"\"\"\n        for day in timetable:\n            if \"blocks\" not in day:\n                continue\n            \n            new_blocks = []\n            for block in day.get(\"blocks\", []):\n                # Skip only non-essential free time, keep meals and breaks\n                if block.get(\"type\") == \"free_time\" and block.get(\"title\") != \"Leisure / Hobby\":\n                    continue\n                    \n                block_copy = dict(block)\n                if block_copy.get(\"type\") == \"study\":\n                    block_copy[\"energy_level\"] = \"high\"\n                new_blocks.append(block_copy)\n            day[\"blocks\"] = new_blocks\n\n        return timetable
+        """More focus: longer study blocks, minimal distractions"""
+        for day in timetable:
+            if "blocks" not in day:
+                continue
+            
+            new_blocks = []
+            for block in day.get("blocks", []):
+                # Skip only non-essential free time, keep meals and breaks
+                if block.get("type") == "free_time" and block.get("title") != "Leisure / Hobby":
+                    continue
+                    
+                block_copy = dict(block)
+                if block_copy.get("type") == "study":
+                    block_copy["energy_level"] = "high"
+                new_blocks.append(block_copy)
+            day["blocks"] = new_blocks
+
+        return timetable
 
     @staticmethod
     def _add_revision_slots(timetable: List[Dict]) -> List[Dict]:
