@@ -172,16 +172,19 @@ class SchedulingEngine:
 
             while remaining_minutes > 0 and slot_index < len(available_slots):
                 slot = available_slots[slot_index]
+                # Calculate block duration: prefer 60-90 min blocks, respect slot size
+                slot_available = min(slot["duration"], 120)
                 block_duration = min(
-                    min(remaining_minutes, 90),
-                    max(45, slot["duration"] // 2)
+                    remaining_minutes,  # Don't exceed required study time
+                    min(90, max(45, slot_available))  # Prefer 45-90 min blocks
                 )
 
                 if block_duration >= 45:
                     block_start = SchedulingEngine.minutes_to_time(slot["start"])
+                    end_time = SchedulingEngine.add_minutes(block_start, int(block_duration))
                     blocks.append({
                         "start": block_start,
-                        "end": SchedulingEngine.add_minutes(block_start, int(block_duration)),
+                        "end": end_time,
                         "type": "study",
                         "subject": subject.get("name"),
                         "priority": subject.get("priority"),
@@ -191,7 +194,7 @@ class SchedulingEngine:
                         )
                     })
 
-                    remaining_minutes -= block_duration
+                    remaining_minutes -= int(block_duration)
                     slot["start"] += int(block_duration)
                     slot["duration"] -= int(block_duration)
 
@@ -436,7 +439,16 @@ class SchedulingEngine:
         optimization: str
     ) -> List[Dict]:
         """Apply AI optimization modifications to timetable"""
-        modified = [dict(day) for day in timetable]
+        # Normalize input - ensure timetable is always a list of days
+        if not isinstance(timetable, list):
+            timetable = [timetable]
+        
+        modified = []
+        for day in timetable:
+            if isinstance(day, dict):
+                modified.append(dict(day))
+            else:
+                modified.append(day)
 
         if optimization == "reduce_stress":
             return SchedulingEngine._reduce_stress(modified)
@@ -453,53 +465,78 @@ class SchedulingEngine:
     def _reduce_stress(timetable: List[Dict]) -> List[Dict]:
         """Reduce stress: shorter study blocks, more breaks"""
         for day in timetable:
+            if "blocks" not in day:
+                continue
+                
             new_blocks = []
             for block in day.get("blocks", []):
-                if block.get("type") == "study":
-                    start_min = SchedulingEngine.time_to_minutes(block.get("start", "00:00"))
-                    end_min = SchedulingEngine.time_to_minutes(block.get("end", "00:00"))
+                block_copy = dict(block)
+                if block_copy.get("type") == "study":
+                    start_min = SchedulingEngine.time_to_minutes(block_copy.get("start", "00:00"))
+                    end_min = SchedulingEngine.time_to_minutes(block_copy.get("end", "00:00"))
                     duration = end_min - start_min
 
-                    if duration > 120:  # If longer than 2 hours
-                        block["end"] = SchedulingEngine.add_minutes(block.get("start"), 90)
+                    # Split longer blocks: if > 2 hours, reduce to 90 mins
+                    if duration > 120:
+                        block_copy["end"] = SchedulingEngine.add_minutes(block_copy.get("start"), 90)
+                        # Add a break after the study block
+                        new_blocks.append(block_copy)
+                        new_blocks.append({
+                            "start": block_copy["end"],
+                            "end": SchedulingEngine.add_minutes(block_copy["end"], 15),
+                            "type": "break"
+                        })
+                        continue
                 
-                new_blocks.append(block)
+                new_blocks.append(block_copy)
             day["blocks"] = new_blocks
 
         return timetable
 
     @staticmethod
     def _add_more_focus(timetable: List[Dict]) -> List[Dict]:
-        """More focus: longer study blocks, minimal distractions"""
-        for day in timetable:
-            new_blocks = [
-                b for b in day.get("blocks", []) if b.get("type") != "free_time"
-            ]
-            for block in new_blocks:
-                if block.get("type") == "study":
-                    block["energy_level"] = "high"
-            day["blocks"] = new_blocks
-
-        return timetable
+        """More focus: longer study blocks, minimal distractions\"\"\"\n        for day in timetable:\n            if \"blocks\" not in day:\n                continue\n            \n            new_blocks = []\n            for block in day.get(\"blocks\", []):\n                # Skip only non-essential free time, keep meals and breaks\n                if block.get(\"type\") == \"free_time\" and block.get(\"title\") != \"Leisure / Hobby\":\n                    continue\n                    \n                block_copy = dict(block)\n                if block_copy.get(\"type\") == \"study\":\n                    block_copy[\"energy_level\"] = \"high\"\n                new_blocks.append(block_copy)\n            day[\"blocks\"] = new_blocks\n\n        return timetable
 
     @staticmethod
     def _add_revision_slots(timetable: List[Dict]) -> List[Dict]:
         """Add revision slots for studied subjects"""
         for day in timetable:
+            if "blocks" not in day:
+                continue
+                
             studied_subjects = set()
             blocks = day.get("blocks", [])
+            occupied_times = set()
 
             for block in blocks:
                 if block.get("type") == "study" and block.get("subject"):
                     studied_subjects.add(block.get("subject"))
+                # Track occupied time slots for conflict avoidance
+                start_min = SchedulingEngine.time_to_minutes(block.get("start", "00:00"))
+                end_min = SchedulingEngine.time_to_minutes(block.get("end", "00:00"))
+                for minute in range(start_min, end_min):
+                    occupied_times.add(minute)
 
+            # Find available slot for revision (after 16:00, avoid conflicts)
+            revision_start_min = SchedulingEngine.time_to_minutes("16:00")
+            revision_end_min = SchedulingEngine.time_to_minutes("20:00")
+            
             for subject in studied_subjects:
-                blocks.append({
-                    "start": "17:00",
-                    "end": "17:30",
-                    "type": "revision",
-                    "subject": subject
-                })
+                # Find first available 30-min slot
+                found_slot = False
+                for minute in range(revision_start_min, revision_end_min - 30):
+                    if not any(m in occupied_times for m in range(minute, minute + 30)):
+                        blocks.append({
+                            "start": SchedulingEngine.minutes_to_time(minute),
+                            "end": SchedulingEngine.minutes_to_time(minute + 30),
+                            "type": "revision",
+                            "subject": subject
+                        })
+                        # Mark as occupied
+                        for m in range(minute, minute + 30):
+                            occupied_times.add(m)
+                        found_slot = True
+                        break
 
             day["blocks"] = sorted(
                 blocks,
@@ -512,17 +549,22 @@ class SchedulingEngine:
     def _weekend_relax_mode(timetable: List[Dict]) -> List[Dict]:
         """Weekend relax: reduce overall workload"""
         for day in timetable:
+            if "blocks" not in day:
+                continue
+                
             new_blocks = []
             for block in day.get("blocks", []):
-                if block.get("type") == "study":
-                    start_min = SchedulingEngine.time_to_minutes(block.get("start", "00:00"))
-                    end_min = SchedulingEngine.time_to_minutes(block.get("end", "00:00"))
+                block_copy = dict(block)
+                if block_copy.get("type") == "study":
+                    start_min = SchedulingEngine.time_to_minutes(block_copy.get("start", "00:00"))
+                    end_min = SchedulingEngine.time_to_minutes(block_copy.get("end", "00:00"))
                     duration = end_min - start_min
 
+                    # Reduce study duration on weekends: max 45 mins per block
                     if duration > 60:
-                        block["end"] = SchedulingEngine.add_minutes(block.get("start"), 45)
+                        block_copy["end"] = SchedulingEngine.add_minutes(block_copy.get("start"), 45)
                 
-                new_blocks.append(block)
+                new_blocks.append(block_copy)
             day["blocks"] = new_blocks
 
         return timetable
