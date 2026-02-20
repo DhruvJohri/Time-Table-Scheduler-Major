@@ -1,11 +1,4 @@
-/**
- * Dashboard — college timetable single-page orchestrator.
- *
- * Layout:
- *   Topbar  : brand + "Add Profile" button
- *   Sidebar : UploadPanel → HistoryPanel → ExportPanel
- *   Main    : TimetableGrid + states
- */
+
 
 import { useCallback, useState } from "react";
 import useTimetable from "./hooks/useTimetable";
