@@ -1,229 +1,246 @@
-"""
-Timetable Routes
-"""
-
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Query
 from bson.objectid import ObjectId
 from datetime import datetime
-from app.schemas import (
-    GenerateTimetableRequest,
-    RegenerateRequest,
-    TimetableSchema
+from typing import Optional
+
+from app.schemas import GenerateTimetableRequest
+from app.models.database import (
+    users_collection,
+    timetables_collection,
+    master_data_collection,
+    assignment_data_collection,
 )
-from app.models.database import users_collection, timetables_collection
-from app.services.scheduling_engine import get_scheduling_engine
+from app.services.college_scheduler import get_college_scheduler
 
 router = APIRouter(prefix="/api/timetables", tags=["timetables"])
-engine = get_scheduling_engine()
 
 
+# ── Helper: serialise Mongo doc to plain JSON-safe dict ───────────────────────
+def _ser(doc: dict) -> dict:
+    """Convert MongoDB document to JSON-serializable dict."""
+    out = {}
+    for k, v in doc.items():
+        if k == "_id":
+            out["id"] = str(v)
+        elif isinstance(v, ObjectId):
+            out[k] = str(v)
+        elif isinstance(v, datetime):
+            out[k] = v.isoformat()
+        elif isinstance(v, dict):
+            out[k] = _ser(v)
+        elif isinstance(v, list):
+            out[k] = [_ser(i) if isinstance(i, dict) else i for i in v]
+        else:
+            out[k] = v
+    return out
+
+
+# ── POST /generate ────────────────────────────────────────────────────────────
 @router.post("/generate", status_code=status.HTTP_201_CREATED)
 async def generate_timetable(request: GenerateTimetableRequest):
-    """Generate a new timetable based on user profile"""
+    """
+    Generate a college timetable using OR-Tools CP-SAT.
+    Reads master + assignment data from MongoDB, runs solver, stores result.
+    """
+    # 1. Verify admin
     try:
-        # Fetch user profile
-        profile = users_collection.find_one({"_id": ObjectId(request.user_id)})
-        if not profile:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User profile not found"
-            )
+        admin = users_collection.find_one({"_id": ObjectId(request.admin_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Invalid admin_id format.")
+    if not admin:
+        raise HTTPException(status_code=404, detail="Admin profile not found.")
 
-        # Convert profile to dict format for engine
-        start_date = request.start_date or datetime.now().strftime("%Y-%m-%d")
-        
-        # Generate timetable based on type
-        if request.timetable_type == "weekly":
-            timetable = engine.generate_weekly_timetable(profile, start_date)
-        elif request.timetable_type == "weekend":
-            timetable = engine.generate_weekend_timetable(profile, start_date)
-        else:  # daily
-            timetable = engine.generate_daily_timetable(profile, start_date)
+    admin_email = admin["email"]
 
-        # Apply optimization if requested
-        if request.optimization:
-            if isinstance(timetable, dict) and "days" in timetable:
-                # Weekly timetable
-                timetable["days"] = engine.apply_optimization(timetable["days"], request.optimization)
-            else:
-                # Daily timetable
-                timetable = engine.apply_optimization([timetable], request.optimization)[0]
-
-        # Store in database
-        timetable_doc = {
-            "user_id": request.user_id,
-            "type": request.timetable_type,
-            "date": start_date,
-            "timetable": timetable,
-            "modifications": [],
-            "created_at": datetime.now(),
-            "updated_at": datetime.now()
-        }
-
-        result = timetables_collection.insert_one(timetable_doc)
-        timetable_doc["_id"] = str(result.inserted_id)
-        timetable_doc["id"] = str(result.inserted_id)
-        
-        return timetable_doc
-
-    except HTTPException:
-        raise
-    except Exception as e:
+    # 2. Load latest master data
+    master = master_data_collection.find_one(
+        {"admin_email": admin_email},
+        sort=[("created_at", -1)]
+    )
+    if not master:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
+            status_code=400,
+            detail="No master data found. Upload Master Data Excel first."
         )
 
+    # 3. Load latest assignment data
+    asgn_query = {"admin_email": admin_email}
+    if request.branch:
+        asgn_query["assignments.branch"] = request.branch
+    if request.year:
+        asgn_query["assignments.year"] = request.year
 
+    asgn_doc = assignment_data_collection.find_one(
+        {"admin_email": admin_email},
+        sort=[("created_at", -1)]
+    )
+    if not asgn_doc:
+        raise HTTPException(
+            status_code=400,
+            detail="No assignment data found. Upload Assignment Data Excel first."
+        )
+
+    assignments = asgn_doc.get("assignments", [])
+    if request.branch:
+        assignments = [a for a in assignments if a["branch"] == request.branch]
+    if request.year:
+        assignments = [a for a in assignments if a["year"] == request.year]
+
+    if not assignments:
+        raise HTTPException(
+            status_code=400,
+            detail="No assignments match the selected Branch/Year filter."
+        )
+
+    # 4. Extract master lists (new schema: classrooms list)
+    teachers   = master.get("teachers", [])
+    subjects   = master.get("subjects", [])
+    classrooms = master.get("classrooms", [])
+
+    # Fallback: derive from records / assignments if master is sparse
+    records = master.get("records", [])
+    if not teachers:
+        teachers = sorted({r["teacher_name"] for r in records})
+    if not teachers:
+        teachers = sorted({a["teacher_name"] for a in assignments})
+    if not subjects:
+        subjects = sorted({r["subject_name"] for r in records})
+    if not subjects:
+        subjects = sorted({a["subject_name"] for a in assignments})
+    if not classrooms:
+        classrooms = sorted({r["classroom"] for r in records if r.get("classroom")})
+    if not classrooms:
+        classrooms = ["R101"]
+
+    # Convert classroom strings to room dicts expected by scheduler
+    rooms = [{"room_name": c, "room_type": "lecture"} for c in classrooms]
+
+    # lab_subjects: any subject name containing 'lab' (case-insensitive)
+    lab_subjects = [s for s in subjects if "lab" in s.lower()]
+
+    # 5. Determine branch/year for versioning
+    branches = sorted({a["branch"] for a in assignments})
+    years    = sorted({a["year"]   for a in assignments})
+    branch_label = request.branch or ",".join(branches)
+    year_label   = request.year   or ",".join(years)
+
+    # 6. Auto-increment version
+    existing = timetables_collection.count_documents({
+        "admin_id":    request.admin_id,
+        "branch":      branch_label,
+        "year":        year_label,
+    })
+    version = existing + 1
+
+    # 7. Run solver
+    try:
+        scheduler = get_college_scheduler()
+        timetable = scheduler.allocate(
+            assignments=assignments,
+            teachers=teachers,
+            subjects=subjects,
+            rooms=rooms,
+            lab_subjects=lab_subjects,
+            branch_filter=request.branch,
+            year_filter=request.year,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Solver error: {exc}")
+
+    # 8. Store
+    start_date = request.start_date or datetime.utcnow().strftime("%Y-%m-%d")
+    label = f"v{version} — {branch_label} / Year {year_label} — {start_date}"
+
+    doc = {
+        "admin_id":   request.admin_id,
+        "branch":     branch_label,
+        "year":       year_label,
+        "version":    version,
+        "label":      label,
+        "timetable":  timetable,
+        "created_at": datetime.utcnow(),
+    }
+    result = timetables_collection.insert_one(doc)
+    doc["id"] = str(result.inserted_id)
+    doc.pop("_id", None)
+    doc["created_at"] = doc["created_at"].isoformat()
+    return doc
+
+
+# ── GET /user/{user_id}/versions ──────────────────────────────────────────────
+@router.get("/user/{user_id}/versions", response_model=list)
+async def get_timetable_versions(
+    user_id: str,
+    branch: Optional[str] = Query(None),
+    year:   Optional[str] = Query(None),
+):
+    """List version summaries for a user's timetables, optionally filtered by branch/year."""
+    query: dict = {"admin_id": user_id}
+    if branch:
+        query["branch"] = branch
+    if year:
+        query["year"] = year
+
+    cursor = timetables_collection.find(
+        query,
+        {"timetable": 0}   # exclude heavy field
+    ).sort("created_at", -1)
+
+    versions = []
+    for doc in cursor:
+        created = doc.get("created_at")
+        versions.append({
+            "id":         str(doc["_id"]),
+            "version":    doc.get("version", 1),
+            "label":      doc.get("label", f"v{doc.get('version',1)}"),
+            "branch":     doc.get("branch", ""),
+            "year":       doc.get("year", ""),
+            "created_at": created.isoformat() if isinstance(created, datetime) else str(created or ""),
+        })
+    return versions
+
+
+# ── GET /user/{user_id} ───────────────────────────────────────────────────────
+@router.get("/user/{user_id}", response_model=list)
+async def get_user_timetables(
+    user_id: str,
+    branch: Optional[str] = Query(None),
+    year:   Optional[str] = Query(None),
+):
+    """Get all timetables for a user, optionally filtered by branch/year."""
+    query: dict = {"admin_id": user_id}
+    if branch:
+        query["branch"] = branch
+    if year:
+        query["year"] = year
+
+    timetables = list(
+        timetables_collection.find(query).sort("created_at", -1)
+    )
+    return [_ser(t) for t in timetables]
+
+
+# ── GET /{timetable_id} ───────────────────────────────────────────────────────
 @router.get("/{timetable_id}", response_model=dict)
 async def get_timetable(timetable_id: str):
-    """Get timetable by ID"""
+    """Get a single timetable by ID."""
     try:
-        timetable = timetables_collection.find_one({"_id": ObjectId(timetable_id)})
-        if not timetable:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Timetable not found"
-            )
-        timetable["id"] = str(timetable.get("_id"))
-        return timetable
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        doc = timetables_collection.find_one({"_id": ObjectId(timetable_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid timetable ID.")
+    if not doc:
+        raise HTTPException(status_code=404, detail="Timetable not found.")
+    return _ser(doc)
 
 
-@router.get("/user/{user_id}", response_model=list)
-async def get_user_timetables(user_id: str):
-    """Get all timetables for a user"""
-    try:
-        timetables = list(
-            timetables_collection.find({"user_id": user_id})
-            .sort("created_at", -1)
-        )
-        for tt in timetables:
-            tt["id"] = str(tt.get("_id"))
-        return timetables
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
-
-
-@router.post("/{timetable_id}/regenerate")
-async def regenerate_timetable(timetable_id: str, request: RegenerateRequest):
-    """Regenerate timetable with optimization"""
-    try:
-        timetable_doc = timetables_collection.find_one({"_id": ObjectId(timetable_id)})
-        if not timetable_doc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Timetable not found"
-            )
-
-        # Get original timetable blocks
-        original_timetable = timetable_doc.get("timetable", {})
-        
-        if isinstance(original_timetable, dict) and "days" in original_timetable:
-            # Weekly timetable
-            original_blocks = original_timetable.get("days", [])
-        else:
-            # Daily timetable
-            original_blocks = [original_timetable] if original_timetable else []
-
-        # Store previous version
-        previous_timetable = [dict(b) for b in original_blocks]
-
-        # Apply optimization
-        new_timetable = engine.apply_optimization(original_blocks, request.optimization)
-
-        # Record modification
-        modification = {
-            "type": request.optimization,
-            "timestamp": datetime.now(),
-            "previous_timetable": previous_timetable,
-            "new_timetable": new_timetable
-        }
-
-        # Update timetable
-        if isinstance(original_timetable, dict) and "days" in original_timetable:
-            original_timetable["days"] = new_timetable
-        else:
-            original_timetable = new_timetable[0] if new_timetable else {}
-
-        timetables_collection.update_one(
-            {"_id": ObjectId(timetable_id)},
-            {
-                "$set": {
-                    "timetable": original_timetable,
-                    "updated_at": datetime.now()
-                },
-                "$push": {"modifications": modification}
-            }
-        )
-
-        updated = timetables_collection.find_one({"_id": ObjectId(timetable_id)})
-        updated["id"] = str(updated.get("_id"))
-        return updated
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-
-
-@router.put("/{timetable_id}")
-async def update_timetable(timetable_id: str, timetable_data: dict):
-    """Update/edit timetable manually"""
-    try:
-        timetables_collection.update_one(
-            {"_id": ObjectId(timetable_id)},
-            {
-                "$set": {
-                    "timetable": timetable_data.get("timetable"),
-                    "updated_at": datetime.now()
-                }
-            }
-        )
-
-        updated = timetables_collection.find_one({"_id": ObjectId(timetable_id)})
-        if not updated:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Timetable not found"
-            )
-        updated["id"] = str(updated.get("_id"))
-        return updated
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-
-
+# ── DELETE /{timetable_id} ───────────────────────────────────────────────────
 @router.delete("/{timetable_id}", status_code=status.HTTP_200_OK)
 async def delete_timetable(timetable_id: str):
-    """Delete timetable"""
+    """Delete a timetable."""
     try:
         result = timetables_collection.delete_one({"_id": ObjectId(timetable_id)})
-        if result.deleted_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Timetable not found"
-            )
-        return {"message": "Timetable deleted"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid timetable ID.")
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Timetable not found.")
+    return {"message": "Timetable deleted"}

@@ -1,110 +1,110 @@
 """
-Pydantic schemas for request/response validation
+College Timetable System — Pydantic Schemas
 """
 
-from pydantic import BaseModel, EmailStr
-from typing import Optional, List, Dict
+from pydantic import BaseModel, EmailStr, field_validator
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 
-class Subject(BaseModel):
-    """Subject/Task definition"""
-    name: str
-    priority: int  # 1-5, 1 is highest
-    daily_hours: float
-    topics: Optional[List[str]] = None
+# ── Admin Profile ─────────────────────────────────────────────────────────────
 
-
-class UserProfileSchema(BaseModel):
-    """User profile schema"""
+class AdminProfileSchema(BaseModel):
+    """Admin / institution profile."""
     email: EmailStr
     name: str
-    wake_up_time: str  # HH:MM format
-    sleep_time: str  # HH:MM format
-    work_start_time: Optional[str] = None
-    work_end_time: Optional[str] = None
-    is_student: bool
-    subjects: List[Subject]
-    productivity_type: str  # morning_person, night_owl, balanced
-    goal_type: str  # exam_prep, work_productivity, balanced_life, fitness_focus
-    break_frequency: int  # minutes
-    lunch_time_preference: str
-    tea_time_preference: str
-    exercise_time: Optional[str] = None
-    exercise_duration: Optional[int] = None  # minutes
-    free_time_required: float  # hours
-    preferred_timetable_type: str  # daily, weekly, exam_mode, workday, weekend
+    college_name: str
+    role: str = "admin"           # admin | coordinator | viewer
 
     class Config:
         from_attributes = True
 
 
-class TimeBlock(BaseModel):
-    """Individual time block in timetable"""
-    start: str  # HH:MM
-    end: str  # HH:MM
-    type: str  # study, work, break, meal, exercise, sleep, free_time, meditation, revision
-    subject: Optional[str] = None
-    title: Optional[str] = None
-    description: Optional[str] = None
-    priority: Optional[int] = None
-    energy_level: Optional[str] = None  # high, medium, low
-    is_fixed: Optional[bool] = False
-    category_color: Optional[str] = None
+# ── Master Data (Upload 1) ────────────────────────────────────────────────────
+
+class TeacherEntry(BaseModel):
+    teacher_name: str
+    subjects: List[str] = []
+    max_hours_per_day: int = 6
 
 
-class DayTimetableSchema(BaseModel):
-    """Daily timetable"""
-    date: Optional[str] = None
-    day: str
-    blocks: List[TimeBlock]
-    total_study_hours: Optional[float] = None
-    total_work_hours: Optional[float] = None
+class SubjectEntry(BaseModel):
+    subject_name: str
+    is_lab: bool = False
+    default_room_type: str = "lecture"   # lecture | lab
 
 
-class WeekTimetableSummary(BaseModel):
-    """Weekly timetable summary"""
-    total_study_hours: float
-    total_work_hours: float
-    subject_distribution: Dict[str, float]
+class RoomEntry(BaseModel):
+    room_name: str
+    capacity: int = 60
+    room_type: str = "lecture"           # lecture | lab
 
 
-class WeekTimetableSchema(BaseModel):
-    """Weekly timetable"""
-    week_start: str
-    week_end: str
-    days: List[DayTimetableSchema]
-    summary: Optional[WeekTimetableSummary] = None
+class MasterDataUploadResponse(BaseModel):
+    upload_id: str
+    admin_email: str
+    teachers_count: int
+    subjects_count: int
+    rooms_count: int
+    teachers_preview: List[str]
+    subjects_preview: List[str]
+    rooms_preview: List[str]
 
 
-class TimetableSchema(BaseModel):
-    """Timetable response"""
-    id: Optional[str] = None
-    user_id: str
-    type: str  # daily, weekly, exam_mode, workday, weekend
-    date: str
-    timetable: dict  # Can be list of DayTimetable or WeekTimetable
-    modifications: Optional[List[Dict]] = []
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+# ── Assignment Data (Upload 2) ────────────────────────────────────────────────
 
-    class Config:
-        from_attributes = True
+class AssignmentEntry(BaseModel):
+    teacher_name: str
+    subject_name: str
+    year: str                      # "1" | "2" | "3" | "4"
+    branch: str                    # "CS" | "EC" | "ME" | ...
+    lectures_per_week: int
 
+
+class AssignmentUploadResponse(BaseModel):
+    upload_id: str
+    admin_email: str
+    rows_parsed: int
+    assignments_preview: List[Dict[str, Any]]
+
+
+# ── Timetable Slot ────────────────────────────────────────────────────────────
+
+class TimetableSlot(BaseModel):
+    """A single period in the generated timetable."""
+    day: str                       # Monday … Saturday
+    period: int                    # 1-based slot index
+    start_time: str                # HH:MM
+    end_time: str                  # HH:MM
+    subject: str
+    teacher: str
+    room: str
+    branch: str
+    year: str
+    is_lab: bool = False
+    is_free: bool = False
+
+
+# ── Generate Request / Response ───────────────────────────────────────────────
 
 class GenerateTimetableRequest(BaseModel):
-    """Request to generate timetable"""
-    user_id: str
-    timetable_type: str
+    admin_id: str
+    branch: Optional[str] = None   # if None → generate for all branches
+    year: Optional[str] = None     # if None → generate for all years
     start_date: Optional[str] = None
-    optimization: Optional[str] = None  # reduce_stress, more_focus, add_revision, weekend_relax
 
 
-class RegenerateRequest(BaseModel):
-    """Request to regenerate with optimization"""
-    optimization: str
+class TimetableVersionSummary(BaseModel):
+    """Lightweight version entry for history list."""
+    id: str
+    version: int
+    label: str
+    branch: str
+    year: str
+    created_at: Optional[datetime] = None
 
+
+# ── Export ────────────────────────────────────────────────────────────────────
 
 class ExportRequest(BaseModel):
-    """Request to export timetable"""
-    format: str  # pdf, csv, json
+    format: str    # pdf | xlsx | csv | json

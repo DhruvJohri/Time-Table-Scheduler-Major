@@ -1,6 +1,5 @@
 """
-Main FastAPI application
-AI Timetable Generator Backend
+College Timetable Generator — FastAPI Application
 """
 
 from fastapi import FastAPI
@@ -10,16 +9,16 @@ import os
 from dotenv import load_dotenv
 
 from app.routes import profiles, timetables, export
+from app.routes import upload_master, upload_assignment
 
 load_dotenv()
 
 app = FastAPI(
-    title="AI Timetable Generator",
-    description="Intelligent scheduling engine for generating optimized timetables",
-    version="1.0.0"
+    title="College Timetable Generator",
+    description="Smart Dynamic Timetable Generator powered by OR-Tools CP-SAT",
+    version="2.0.0"
 )
 
-# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,49 +27,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# Include routers
+# Routers
 app.include_router(profiles.router)
 app.include_router(timetables.router)
 app.include_router(export.router)
+app.include_router(upload_master.router)
+app.include_router(upload_assignment.router)
 
 
-# Health check endpoint
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "OK",
-        "message": "AI Timetable Generator Backend is running"
-    }
+    return {"status": "OK", "message": "College Timetable Generator is running"}
 
 
-# Root endpoint
 @app.get("/")
 async def root():
-    """Root endpoint with API info"""
     return {
-        "name": "AI Timetable Generator",
-        "version": "1.0.0",
-        "description": "Intelligent scheduling engine for generating optimized timetables",
+        "name": "College Timetable Generator",
+        "version": "2.0.0",
         "endpoints": {
-            "health": "/health",
-            "profiles": "/api/profiles",
-            "timetables": "/api/timetables",
-            "export": "/api/export",
-            "docs": "/docs",
-            "openapi": "/openapi.json"
+            "health":            "/health",
+            "profiles":          "/api/profiles",
+            "upload_master":     "/api/upload/master",
+            "upload_assignment": "/api/upload/assignment",
+            "timetables":        "/api/timetables",
+            "export":            "/api/export",
+            "docs":              "/docs",
         }
     }
 
 
-# 404 handler
 @app.exception_handler(404)
 async def not_found_handler(request, exc):
-    return JSONResponse(
-        status_code=404,
-        content={"detail": "Endpoint not found"}
-    )
+    return JSONResponse(status_code=404, content={"detail": "Endpoint not found"})
 
 
 if __name__ == "__main__":
