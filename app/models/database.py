@@ -40,7 +40,7 @@ def _create_indexes():
             ("version",  DESCENDING),
         ])
         timetables_collection.create_index("created_at")
-        uploads_collection.create_index("admin_email")
+
         master_data_collection.create_index("admin_email")
         assignment_data_collection.create_index("admin_email")
         assignment_data_collection.create_index([

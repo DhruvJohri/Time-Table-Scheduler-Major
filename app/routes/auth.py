@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, EmailStr
 from jose import jwt
-from passlib.context import CryptContext
+import bcrypt
 
 from app.models.database import users_collection
 
@@ -18,7 +18,7 @@ JWT_SECRET      = os.getenv("JWT_SECRET", "change-this-secret")
 JWT_ALGORITHM   = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
 
-_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 
 
 # ── Request / Response schemas ────────────────────────────────────────────────
@@ -65,7 +65,7 @@ async def login(body: LoginRequest):
         )
 
     pw_hash = admin.get("password_hash", "")
-    if not pw_hash or not _pwd_ctx.verify(body.password, pw_hash):
+    if not pw_hash or not bcrypt.checkpw(body.password.encode("utf-8"), pw_hash.encode("utf-8")):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password.",

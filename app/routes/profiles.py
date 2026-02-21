@@ -8,14 +8,16 @@ DELETE /api/profiles/{email}
 
 from fastapi import APIRouter, HTTPException, status
 from bson.objectid import ObjectId
-from passlib.context import CryptContext
+import bcrypt
 
 from app.schemas import AdminProfileSchema
 from app.models.database import users_collection
 
 router = APIRouter(prefix="/api/profiles", tags=["profiles"])
 
-_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def _hash_pw(plain: str) -> str:
+    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
 def _ser(doc: dict) -> dict:
@@ -28,21 +30,27 @@ def _ser(doc: dict) -> dict:
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_profile(profile: AdminProfileSchema):
     """
-    Create a new admin profile.
-    Password is hashed with bcrypt before storage.
-    Returns existing profile (without hash) if email already registered.
+    Create or re-register an admin profile.
+    If the email already exists the profile fields AND password hash are
+    updated (upsert), so a user who registered with a corrupted hash can
+    re-register with a fresh password without having to clear the DB.
     """
-    existing = users_collection.find_one({"email": profile.email})
-    if existing:
-        return _ser(existing)
-
     data = profile.model_dump()
     raw_password = data.pop("password")
-    data["password_hash"] = _pwd_ctx.hash(raw_password)
+    data["password_hash"] = _hash_pw(raw_password)
+
+    existing = users_collection.find_one({"email": profile.email})
+    if existing:
+        users_collection.update_one(
+            {"email": profile.email},
+            {"$set": data},
+        )
+        updated = users_collection.find_one({"email": profile.email})
+        return _ser(updated)
 
     result = users_collection.insert_one(data)
     data["id"] = str(result.inserted_id)
-    return data
+    return _ser(data)
 
 
 @router.get("/{email}")
@@ -65,7 +73,7 @@ async def update_profile(email: str, profile: AdminProfileSchema):
 
     data = profile.model_dump()
     raw_password = data.pop("password")
-    data["password_hash"] = _pwd_ctx.hash(raw_password)
+    data["password_hash"] = _hash_pw(raw_password)
 
     users_collection.update_one({"email": email}, {"$set": data})
     updated = users_collection.find_one({"email": email})
