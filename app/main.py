@@ -8,15 +8,30 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import os
 from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 
-from app.routes import profiles, timetables, export
+from app.routes import timetables
+from app.models.database import init_db
 
 load_dotenv()
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown events."""
+    # Startup
+    print("Initializing database...")
+    init_db()
+    print("Database initialized successfully!")
+    yield
+    # Shutdown
+    print("Shutting down...")
+
+
 app = FastAPI(
     title="AI Timetable Generator",
-    description="Intelligent scheduling engine for generating optimized timetables",
-    version="1.0.0"
+    description="Production-grade constraint-based scheduler for college timetables",
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # CORS Middleware
@@ -30,9 +45,7 @@ app.add_middleware(
 
 
 # Include routers
-app.include_router(profiles.router)
 app.include_router(timetables.router)
-app.include_router(export.router)
 
 
 # Health check endpoint
@@ -52,12 +65,15 @@ async def root():
     return {
         "name": "AI Timetable Generator",
         "version": "1.0.0",
-        "description": "Intelligent scheduling engine for generating optimized timetables",
+        "description": "Production-grade constraint-based scheduler for college timetables",
         "endpoints": {
             "health": "/health",
-            "profiles": "/api/profiles",
-            "timetables": "/api/timetables",
-            "export": "/api/export",
+            "generate_timetable": "POST /api/timetable/generate",
+            "get_timetable": "GET /api/timetable",
+            "get_branch_timetable": "GET /api/timetable/{branch_code}/{year}/{section}",
+            "validate": "POST /api/timetable/validate",
+            "statistics": "GET /api/timetable/statistics",
+            "clear": "DELETE /api/timetable/clear",
             "docs": "/docs",
             "openapi": "/openapi.json"
         }

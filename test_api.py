@@ -1,273 +1,275 @@
 """
-test_api.py - Example script to test the AI Timetable Generator API
+test_api.py - Test script for AI Timetable Generator API
 
-This script demonstrates how to interact with the backend API.
-Run the backend first, then run this script.
+This script demonstrates how to interact with the college timetable generation API.
+Run the backend first with: python -m uvicorn app.main:app --reload --port 8000
+Then run this script: python test_api.py
 """
 
 import requests
 import json
-from datetime import datetime, timedelta
+import time
+from datetime import datetime
 
-BASE_URL = "http://localhost:8000/api"
-
-# Test user data
-TEST_USER = {
-    "email": "test@example.com",
-    "name": "Test User",
-    "is_student": True,
-    "wake_up_time": "06:00",
-    "sleep_time": "23:00",
-    "work_start_time": "09:00",
-    "work_end_time": "17:00",
-    "subjects": [
-        {"name": "Data Structures", "priority": 1, "daily_hours": 3},
-        {"name": "Web Development", "priority": 2, "daily_hours": 2},
-        {"name": "Mathematics", "priority": 3, "daily_hours": 1.5}
-    ],
-    "productivity_type": "morning_person",
-    "goal_type": "exam_prep",
-    "break_frequency": 30,
-    "lunch_time_preference": "12:30",
-    "tea_time_preference": "15:00",
-    "exercise_time": "07:00",
-    "exercise_duration": 45,
-    "free_time_required": 2,
-    "preferred_timetable_type": "daily"
-}
+BASE_URL = "http://localhost:8000/api/timetable"
 
 
 def print_section(title):
     """Print section header"""
-    print(f"\n{'='*60}")
+    print(f"\n{'='*70}")
     print(f"  {title}")
-    print(f"{'='*60}\n")
+    print(f"{'='*70}\n")
 
 
-def test_create_profile():
-    """Test: Create user profile"""
-    print_section("CREATE USER PROFILE")
-    
-    response = requests.post(f"{BASE_URL}/profiles", json=TEST_USER)
-    
-    if response.status_code == 201:
-        profile = response.json()
-        print("✅ Profile created successfully!")
-        print(f"Profile ID: {profile.get('_id')}")
-        print(f"Email: {profile.get('email')}")
-        return profile.get("_id")
-    else:
-        print(f"❌ Error: {response.status_code}")
-        print(response.json())
-        return None
+def test_health():
+    """Test: Health check"""
+    print_section("HEALTH CHECK")
+    try:
+        response = requests.get("http://localhost:8000/health", timeout=5)
+        if response.status_code == 200:
+            print("✅ Server is running!")
+            print(json.dumps(response.json(), indent=2))
+            return True
+        else:
+            print(f"❌ Server returned {response.status_code}")
+            return False
+    except requests.ConnectionError:
+        print("❌ Cannot connect to server. Make sure it's running on http://localhost:8000")
+        return False
 
 
-def test_get_profile(email):
-    """Test: Get user profile"""
-    print_section("GET USER PROFILE")
-    
-    response = requests.get(f"{BASE_URL}/profiles/{email}")
-    
-    if response.status_code == 200:
-        profile = response.json()
-        print("✅ Profile retrieved successfully!")
-        print(json.dumps(profile, indent=2, default=str))
-    else:
-        print(f"❌ Error: {response.status_code}")
-        print(response.json())
-
-
-def test_generate_daily_timetable(user_id):
-    """Test: Generate daily timetable"""
-    print_section("GENERATE DAILY TIMETABLE")
+def test_generate_schedule():
+    """Test: Generate timetable"""
+    print_section("GENERATE TIMETABLE")
     
     payload = {
-        "user_id": user_id,
-        "timetable_type": "daily",
-        "start_date": datetime.now().strftime("%Y-%m-%d")
+        "seed": 42,  # Deterministic generation
+        "force_regenerate": True,
+        "include_clubs": True
     }
     
-    response = requests.post(f"{BASE_URL}/timetables/generate", json=payload)
+    print(f"Request payload: {json.dumps(payload, indent=2)}")
+    print("\nGenerating schedule (this may take a moment)...\n")
     
-    if response.status_code == 201:
-        timetable = response.json()
-        print("✅ Daily timetable generated successfully!")
-        print(f"Timetable ID: {timetable.get('_id')}")
-        print(f"Type: {timetable.get('type')}")
-        print(f"Date: {timetable.get('date')}")
+    try:
+        response = requests.post(f"{BASE_URL}/generate", json=payload, timeout=120)
         
-        # Print blocks
-        print("\nSchedule:")
-        blocks = timetable.get("timetable", {}).get("blocks", [])
-        for block in blocks:
-            activity = block.get("type").upper()
-            subject = f" ({block.get('subject')})" if block.get("subject") else ""
-            print(f"  {block.get('start')} - {block.get('end')}: {activity}{subject}")
+        if response.status_code == 200:
+            result = response.json()
+            print("✅ Schedule generated successfully!")
+            print(json.dumps(result, indent=2))
+            return True
+        else:
+            print(f"❌ Error: {response.status_code}")
+            print(response.json())
+            return False
+    except requests.Timeout:
+        print("❌ Request timed out. Generation may be taking long.")
+        return False
+    except ConnectionError:
+        print("❌ Could not connect to server.")
+        return False
+
+
+def test_get_full_timetable():
+    """Test: Get full timetable"""
+    print_section("GET FULL TIMETABLE")
+    
+    try:
+        response = requests.get(BASE_URL, timeout=10)
         
-        return timetable.get("_id")
-    else:
-        print(f"❌ Error: {response.status_code}")
-        print(response.json())
-        return None
+        if response.status_code == 200:
+            result = response.json()
+            print("✅ Timetable retrieved successfully!")
+            print(f"Total entries: {result.get('total_entries', 0)}")
+            print(f"Generated at: {result.get('generated_at', 'N/A')}")
+            
+            days = result.get('days', {})
+            print(f"\nDays with entries: {', '.join(days.keys())}")
+            
+            # Show sample from first day
+            first_day = next(iter(days.values())) if days else []
+            if first_day:
+                print(f"\nSample entries from first day ({len(first_day)} total):")
+                for i, entry in enumerate(first_day[:3]):
+                    print(f"  {i+1}. P{entry['period']} - {entry['subject']} ({entry['type']})")
+                if len(first_day) > 3:
+                    print(f"  ... and {len(first_day) - 3} more")
+            
+            return True
+        else:
+            print(f"❌ Error: {response.status_code}")
+            print(response.json())
+            return False
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        return False
 
 
-def test_generate_weekly_timetable(user_id):
-    """Test: Generate weekly timetable"""
-    print_section("GENERATE WEEKLY TIMETABLE")
+def test_get_branch_timetable():
+    """Test: Get branch-specific timetable"""
+    print_section("GET BRANCH TIMETABLE (CSE Year 3 Section A)")
     
-    payload = {
-        "user_id": user_id,
-        "timetable_type": "weekly",
-        "start_date": datetime.now().strftime("%Y-%m-%d")
-    }
+    branch = "CSE"
+    year = 3
+    section = "A"
     
-    response = requests.post(f"{BASE_URL}/timetables/generate", json=payload)
-    
-    if response.status_code == 201:
-        timetable = response.json()
-        print("✅ Weekly timetable generated successfully!")
-        print(f"Timetable ID: {timetable.get('_id')}")
-        print(f"Week: {timetable.get('timetable', {}).get('week_start')} to {timetable.get('timetable', {}).get('week_end')}")
+    try:
+        response = requests.get(f"{BASE_URL}/{branch}/{year}/{section}", timeout=10)
         
-        # Print summary
-        summary = timetable.get("timetable", {}).get("summary", {})
-        print(f"\nWeekly Summary:")
-        print(f"  Total Study Hours: {summary.get('total_study_hours')}")
-        print(f"  Total Work Hours: {summary.get('total_work_hours')}")
-        print(f"  Subject Distribution:")
-        for subject, hours in summary.get("subject_distribution", {}).items():
-            print(f"    - {subject}: {hours} hours")
+        if response.status_code == 200:
+            result = response.json()
+            print("✅ Branch timetable retrieved successfully!")
+            print(f"Branch: {result['branch']}")
+            print(f"Year: {result['year']}")
+            print(f"Section: {result['section']}")
+            print(f"Total entries: {result['total']}")
+            
+            entries = result.get('entries', [])
+            if entries:
+                # Group by day
+                by_day = {}
+                for entry in entries:
+                    day = entry['day']
+                    if day not in by_day:
+                        by_day[day] = []
+                    by_day[day].append(entry)
+                
+                print(f"\nSchedule:")
+                for day in sorted(by_day.keys()):
+                    print(f"\n  {day}:")
+                    for entry in sorted(by_day[day], key=lambda x: x['period']):
+                        print(f"    P{entry['period']}: {entry['subject']} - {entry['faculty']} ({entry['type']})")
+            
+            return True
+        else:
+            print(f"❌ Error: {response.status_code}")
+            if response.status_code == 404:
+                print("   Timetable not found. Generate one first.")
+            else:
+                print(response.json())
+            return False
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        return False
+
+
+def test_validate_schedule():
+    """Test: Validate schedule"""
+    print_section("VALIDATE SCHEDULE")
+    
+    try:
+        response = requests.post(f"{BASE_URL}/validate", timeout=30)
         
-        return timetable.get("_id")
-    else:
-        print(f"❌ Error: {response.status_code}")
-        print(response.json())
-        return None
+        if response.status_code == 200:
+            result = response.json()
+            print("✅ Schedule validation completed!")
+            print(f"Is valid: {result['is_valid']}")
+            print(f"Total conflicts: {result['total_conflicts']}")
+            print(f"Allocation percentage: {result['allocation_percentage']:.1f}%")
+            
+            if result['unallocated_subjects']:
+                print(f"\nUnallocated subjects ({len(result['unallocated_subjects'])}):")
+                for subject in result['unallocated_subjects'][:5]:
+                    print(f"  - {subject}")
+                if len(result['unallocated_subjects']) > 5:
+                    print(f"  ... and {len(result['unallocated_subjects']) - 5} more")
+            
+            return True
+        else:
+            print(f"❌ Error: {response.status_code}")
+            print(response.json())
+            return False
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        return False
 
 
-def test_get_timetable(timetable_id):
-    """Test: Get timetable by ID"""
-    print_section("GET TIMETABLE")
+def test_get_statistics():
+    """Test: Get schedule statistics"""
+    print_section("GET SCHEDULE STATISTICS")
     
-    response = requests.get(f"{BASE_URL}/timetables/{timetable_id}")
-    
-    if response.status_code == 200:
-        timetable = response.json()
-        print("✅ Timetable retrieved successfully!")
-        print(f"ID: {timetable.get('_id')}")
-        print(f"Type: {timetable.get('type')}")
-        print(f"Created: {timetable.get('created_at')}")
-    else:
-        print(f"❌ Error: {response.status_code}")
-        print(response.json())
-
-
-def test_regenerate_timetable(timetable_id, optimization):
-    """Test: Regenerate timetable with optimization"""
-    print_section(f"REGENERATE TIMETABLE - {optimization.upper()}")
-    
-    payload = {"optimization": optimization}
-    response = requests.post(f"{BASE_URL}/timetables/{timetable_id}/regenerate", json=payload)
-    
-    if response.status_code == 200:
-        timetable = response.json()
-        print(f"✅ Timetable regenerated with '{optimization}' optimization!")
-        modifications = timetable.get("modifications", [])
-        print(f"Total modifications: {len(modifications)}")
-        if modifications:
-            print(f"Latest: {modifications[-1].get('type')}")
-    else:
-        print(f"❌ Error: {response.status_code}")
-        print(response.json())
-
-
-def test_export_timetable(timetable_id):
-    """Test: Export timetable"""
-    print_section("EXPORT TIMETABLE")
-    
-    # JSON export
-    response = requests.get(f"{BASE_URL}/export/{timetable_id}/json")
-    if response.status_code == 200:
-        print("✅ JSON export available")
-    
-    # CSV export
-    response = requests.get(f"{BASE_URL}/export/{timetable_id}/csv")
-    if response.status_code == 200:
-        print("✅ CSV export available")
-    
-    # Share link
-    response = requests.get(f"{BASE_URL}/export/{timetable_id}/share")
-    if response.status_code == 200:
-        share_data = response.json()
-        print("✅ Share link generated")
-        print(f"URL: {share_data.get('shareUrl')}")
-
-
-def test_get_user_timetables(user_id):
-    """Test: Get all user timetables"""
-    print_section("GET ALL USER TIMETABLES")
-    
-    response = requests.get(f"{BASE_URL}/timetables/user/{user_id}")
-    
-    if response.status_code == 200:
-        timetables = response.json()
-        print(f"✅ Found {len(timetables)} timetable(s)")
-        for tt in timetables:
-            print(f"  - {tt.get('type')}: {tt.get('date')} (ID: {tt.get('_id')})")
-    else:
-        print(f"❌ Error: {response.status_code}")
-        print(response.json())
+    try:
+        response = requests.get(f"{BASE_URL}/statistics", timeout=10)
+        
+        if response.status_code == 200:
+            stats = response.json()
+            print("✅ Statistics retrieved!")
+            
+            print(f"\nResources:")
+            print(f"  Total subjects: {stats['total_subjects']}")
+            print(f"  Total branches: {stats['total_branches']}")
+            print(f"  Total faculty: {stats['total_faculty']}")
+            print(f"  Total classrooms: {stats['total_classrooms']}")
+            print(f"  Total lab rooms: {stats['total_labrooms']}")
+            
+            print(f"\nScheduled entries:")
+            print(f"  Lectures: {stats['lectures_scheduled']}")
+            print(f"  Tutorials: {stats['tutorials_scheduled']}")
+            print(f"  Labs: {stats['labs_scheduled']}")
+            print(f"  Seminars: {stats['seminars_scheduled']}")
+            print(f"  Club activities: {stats['clubs_scheduled']}")
+            
+            print(f"\nUtilization:")
+            print(f"  Faculty: {stats['faculty_utilization']:.1f}%")
+            print(f"  Classrooms: {stats['classroom_utilization']:.1f}%")
+            print(f"  Lab rooms: {stats['labroom_utilization']:.1f}%")
+            
+            return True
+        else:
+            print(f"❌ Error: {response.status_code}")
+            print(response.json())
+            return False
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        return False
 
 
 def main():
     """Run all tests"""
-    print("\n" + "="*60)
+    print("\n" + "="*70)
     print("  AI TIMETABLE GENERATOR - API TEST SUITE")
-    print("="*60)
-    print("Ensure the backend is running before starting tests!")
-    print("Run: python run.py")
+    print("="*70)
+    print(f"\nTest started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Backend URL: {BASE_URL}")
     
-    try:
-        # Test 1: Create profile
-        user_id = test_create_profile()
-        if not user_id:
-            print("\n❌ Failed to create profile. Exiting.")
-            return
-        
-        # Test 2: Get profile
-        test_get_profile(TEST_USER["email"])
-        
-        # Test 3: Generate daily timetable
-        daily_id = test_generate_daily_timetable(user_id)
-        
-        # Test 4: Generate weekly timetable
-        weekly_id = test_generate_weekly_timetable(user_id)
-        
-        # Test 5: Get timetable
-        if daily_id:
-            test_get_timetable(daily_id)
-        
-        # Test 6: Regenerate with optimizations
-        if daily_id:
-            test_regenerate_timetable(daily_id, "reduce_stress")
-            test_regenerate_timetable(daily_id, "more_focus")
-        
-        # Test 7: Export
-        if daily_id:
-            test_export_timetable(daily_id)
-        
-        # Test 8: Get all user timetables
-        test_get_user_timetables(user_id)
-        
-        print("\n" + "="*60)
-        print("  ✅ ALL TESTS COMPLETED SUCCESSFULLY!")
-        print("="*60 + "\n")
-        
-    except requests.exceptions.ConnectionError:
-        print("\n❌ Error: Cannot connect to backend at http://localhost:8000")
-        print("Make sure the backend is running: python run.py")
-    except Exception as e:
-        print(f"\n❌ Error: {str(e)}")
+    # Check if server is running
+    if not test_health():
+        print("\n" + "!"*70)
+        print("  Cannot proceed without server. Please start the backend:")
+        print("  python -m uvicorn app.main:app --reload --port 8000")
+        print("!"*70)
+        return
+    
+    tests = [
+        ("Generate Schedule", test_generate_schedule),
+        ("Get Full Timetable", test_get_full_timetable),
+        ("Get Branch Timetable", test_get_branch_timetable),
+        ("Validate Schedule", test_validate_schedule),
+        ("Get Statistics", test_get_statistics),
+    ]
+    
+    results = {}
+    for name, test_func in tests:
+        try:
+            results[name] = test_func()
+        except Exception as e:
+            print(f"❌ Error running test: {str(e)}")
+            results[name] = False
+        time.sleep(0.5)
+    
+    # Summary
+    print_section("TEST SUMMARY")
+    passed = sum(1 for v in results.values() if v)
+    total = len(results)
+    
+    for name, result in results.items():
+        status = "✅ PASS" if result else "❌ FAIL"
+        print(f"{status}: {name}")
+    
+    print(f"\nTotal: {passed}/{total} passed")
+    print(f"\nTest completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*70 + "\n")
 
 
 if __name__ == "__main__":
