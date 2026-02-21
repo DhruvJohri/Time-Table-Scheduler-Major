@@ -263,6 +263,9 @@ class ScheduleGenerationResponse(BaseModel):
     conflict_count: int = 0
     unallocated_subjects: int = 0
     failed_subjects: Optional[List[str]] = None
+    capacity: Optional[int] = None
+    demand: Optional[int] = None
+    expected_empty: Optional[int] = None
 
 
 # Validation Report
