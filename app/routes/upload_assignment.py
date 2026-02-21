@@ -5,13 +5,14 @@ Columns required: TeacherName | SubjectName | Year | Branch | LecturesPerWeek
 Admin is identified by the admin_email query param passed by the frontend.
 """
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Query, status
+from fastapi import APIRouter, HTTPException, UploadFile, File, Query, status, Depends
 from io import BytesIO
 from datetime import datetime
 from typing import Optional
 import pandas as pd
 
 from app.models.database import users_collection, assignment_data_collection
+from app.dependencies import get_current_admin
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 
@@ -62,6 +63,7 @@ def _find_admin(email: str):
 async def upload_assignment_data(
     file: UploadFile = File(...),
     admin_email: Optional[str] = Query(None, description="Admin email (required)"),
+    _admin=Depends(get_current_admin),
 ):
     """
     Upload Assignment Data Excel file.

@@ -24,7 +24,6 @@ db: Database = client[DATABASE_NAME]
 # ── Collections ───────────────────────────────────────────────────────────────
 users_collection:           Collection = db["users"]
 timetables_collection:      Collection = db["timetables"]
-uploads_collection:         Collection = db["uploads"]
 master_data_collection:     Collection = db["master_data"]
 assignment_data_collection: Collection = db["assignment_data"]
 

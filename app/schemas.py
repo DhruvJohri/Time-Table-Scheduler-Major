@@ -15,6 +15,7 @@ class AdminProfileSchema(BaseModel):
     name: str
     college_name: str
     role: str = "admin"           # admin | coordinator | viewer
+    password: str                 # plain-text on input; stored as bcrypt hash
 
     class Config:
         from_attributes = True

@@ -1,14 +1,15 @@
 """
-Export Routes - JSON, CSV, PDF
+Export Routes — PDF only
+GET /api/export/{timetable_id}/pdf  🔒 (auth required)
 """
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
 from fastapi.responses import StreamingResponse
 from bson.objectid import ObjectId
-from io import StringIO, BytesIO
-import csv, json
+from io import BytesIO
 from datetime import datetime
 from app.models.database import timetables_collection
+from app.dependencies import get_current_admin
 import os
 
 # ── PDF export ─────────────────────────────────────────────────────────────────
@@ -18,18 +19,16 @@ from reportlab.platypus import (
     SimpleDocTemplate, Table, TableStyle, Spacer, Paragraph
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.enums import TA_CENTER
 
 pt: float = 1.0
 
 router = APIRouter(prefix="/api/export", tags=["export"])
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+DAYS      = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+DAY_SHORT = {"Monday":"MON","Tuesday":"TUE","Wednesday":"WED",
+             "Thursday":"THU","Friday":"FRI","Saturday":"SAT"}
 
-DAYS         = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-DAY_SHORT    = {"Monday":"MON","Tuesday":"TUE","Wednesday":"WED",
-                "Thursday":"THU","Friday":"FRI","Saturday":"SAT"}
-# Ordered column definitions: (type, period_number_or_None, header_label)
 COL_DEFS = [
     ("period", 1, "8:00\n9:00"),
     ("period", 2, "9:00\n10:00"),
@@ -41,42 +40,29 @@ COL_DEFS = [
     ("period", 6, "14:00\n15:00"),
     ("period", 7, "15:15\n16:15"),
 ]
-PERIOD_COLS = [c[1] for c in COL_DEFS if c[0] == "period"]
-
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Routes
+# Route
 # ─────────────────────────────────────────────────────────────────────────────
-
-@router.get("/{timetable_id}/json")
-async def export_json(timetable_id: str):
-    try:
-        doc = timetables_collection.find_one({"_id": ObjectId(timetable_id)})
-        if not doc:
-            raise HTTPException(status_code=404, detail="Timetable not found")
-        doc["_id"] = str(doc.get("_id"))
-        def _dt(o):
-            if isinstance(o, datetime): return o.isoformat()
-            raise TypeError(type(o))
-        return StreamingResponse(iter([json.dumps(doc, default=_dt, indent=2)]),
-            media_type="application/json",
-            headers={"Content-Disposition": f"attachment; filename=timetable-{timetable_id}.json"})
-    except HTTPException: raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.get("/{timetable_id}/pdf")
-async def export_pdf(timetable_id: str):
-    """Export timetable as landscape A4 PDF matching the UI grid layout."""
+async def export_pdf(
+    timetable_id: str,
+    _admin=Depends(get_current_admin),
+):
+    """Export timetable as landscape A4 PDF. Requires: Authorization: Bearer <token>"""
     try:
         doc = timetables_collection.find_one({"_id": ObjectId(timetable_id)})
         if not doc:
             raise HTTPException(status_code=404, detail="Timetable not found")
         pdf_bytes = _generate_pdf_timetable(doc)
-        return StreamingResponse(BytesIO(pdf_bytes), media_type="application/pdf",
-            headers={"Content-Disposition": f"attachment; filename=timetable-{timetable_id}.pdf"})
-    except HTTPException: raise
+        return StreamingResponse(
+            BytesIO(pdf_bytes),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename=timetable-{timetable_id}.pdf"},
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -94,7 +80,6 @@ _ALT   = colors.HexColor("#111827")
 _ACC   = colors.HexColor("#6366f1")
 _WHITE = colors.white
 
-# Branch accent colours (background tint for occupied cells)
 _BRANCH_TINT = {
     "CS": colors.HexColor("#dbeafe"),  "EC": colors.HexColor("#d1fae5"),
     "ME": colors.HexColor("#fef3c7"),  "CE": colors.HexColor("#ede9fe"),
@@ -122,7 +107,6 @@ def _branch_bdr(branch):
 
 
 def _collect_sections(timetable_data: dict):
-    """Return sorted list of 'branch|year' section keys found in the data."""
     sec_set = set()
     for slots in timetable_data.values():
         for s in (slots if isinstance(slots, list) else []):
@@ -132,14 +116,13 @@ def _collect_sections(timetable_data: dict):
 
 
 def _build_slot_map(timetable_data: dict, sections):
-    """
-    Build map: day → section_key → period → slot_dict
-    """
     m = {day: {sec: {} for sec in sections} for day in DAYS}
     for day, slots in timetable_data.items():
-        if day not in m: continue
+        if day not in m:
+            continue
         for s in (slots if isinstance(slots, list) else []):
-            if s.get("is_free"): continue
+            if s.get("is_free"):
+                continue
             sec = f"{s.get('branch','')}|{s.get('year','')}"
             if sec in m[day]:
                 m[day][sec][s.get("period")] = s
@@ -147,13 +130,7 @@ def _build_slot_map(timetable_data: dict, sections):
 
 
 def _generate_pdf_timetable(timetable: dict) -> bytes:
-    """
-    Build a landscape A4 PDF that mirrors the UI grid:
-      Row structure  : one sub-row per Branch+Year section, grouped by Day
-      Column structure: DAY | SECTION | P1 | P2 | BREAK | P3 | P4 | LUNCH | P5 | P6 | P7
-    """
     buf = BytesIO()
-    # Landscape A4 ≈ 842 × 595 pt
     doc = SimpleDocTemplate(
         buf,
         pagesize=landscape(A4),
@@ -194,11 +171,7 @@ def _generate_pdf_timetable(timetable: dict) -> bytes:
         sections = ["—|—"]
 
     slot_map = _build_slot_map(tt_data, sections)
-    n_sec    = len(sections)
 
-    # ── Column widths ─────────────────────────────────────────────
-    # Total usable ≈ 794 pt (842 - 48 margins)
-    # DAY=30, SEC=36, BREAK=18, LUNCH=18, each period=(794-30-36-36)/7 ≈ 99
     W_DAY  = 30
     W_SEC  = 36
     W_SEP  = 18
@@ -206,44 +179,29 @@ def _generate_pdf_timetable(timetable: dict) -> bytes:
     W_AVAIL = 794 - W_USED
     W_PER  = round(W_AVAIL / 7, 1)
 
-    col_widths = []
-    col_widths.append(W_DAY)   # DAY
-    col_widths.append(W_SEC)   # SECTION
+    col_widths = [W_DAY, W_SEC]
     for ctype, _, _ in COL_DEFS:
-        col_widths.append(W_SEP if ctype=="sep" else W_PER)
+        col_widths.append(W_SEP if ctype == "sep" else W_PER)
 
-    # ── Table header row ──────────────────────────────────────────
     hdr_row = [Paragraph("DAY", hdr_st), Paragraph("SECTION", hdr_st)]
     for ctype, _, lbl in COL_DEFS:
         hdr_row.append(Paragraph(lbl, hdr_st))
 
-    table_rows   = [hdr_row]
-    style_cmds   = []
-    cur_row      = 1          # row index (0 = header)
+    table_rows = [hdr_row]
+    style_cmds = []
+    cur_row    = 1
 
-    # ── Data rows (one sub-row per section, grouped by day) ───────
     for di, day in enumerate(DAYS):
         day_start = cur_row
         for si, sec_key in enumerate(sections):
             sec_br, sec_yr = sec_key.split("|")
-            bdr_c  = _branch_bdr(sec_br)
             tint_c = _branch_tint(sec_br)
 
             row_cells = []
-
-            # DAY cell — only on first section row, spans all section rows
-            if si == 0:
-                row_cells.append(Paragraph(DAY_SHORT.get(day, day[:3]), day_st))
-            else:
-                row_cells.append("")
-
-            # SECTION cell
-            sec_label = f"{sec_br}"
-            if sec_yr:
-                sec_label += f"\nY{sec_yr}"
+            row_cells.append(Paragraph(DAY_SHORT.get(day, day[:3]), day_st) if si == 0 else "")
+            sec_label = f"{sec_br}" + (f"\nY{sec_yr}" if sec_yr else "")
             row_cells.append(Paragraph(sec_label, sec_st))
 
-            # Period / separator cells
             for ctype, period_num, _ in COL_DEFS:
                 if ctype == "sep":
                     row_cells.append("")
@@ -256,8 +214,7 @@ def _generate_pdf_timetable(timetable: dict) -> bytes:
                         lab  = " [LAB]" if slot.get("is_lab") else ""
                         txt  = f"<b>{subj}{lab}</b><br/>{tchr}<br/>{room}"
                         row_cells.append(Paragraph(txt, cell_st))
-                        # Occupied cell background tint
-                        col_idx = 2 + [i for i,c in enumerate(COL_DEFS) if c[1]==period_num][0]
+                        col_idx = 2 + [i for i, c in enumerate(COL_DEFS) if c[1] == period_num][0]
                         style_cmds.append(
                             ("BACKGROUND", (col_idx, cur_row), (col_idx, cur_row), tint_c)
                         )
@@ -265,20 +222,14 @@ def _generate_pdf_timetable(timetable: dict) -> bytes:
                         row_cells.append(Paragraph("—", sep_st))
 
             table_rows.append(row_cells)
-
-            # Section background (dark)
             style_cmds.append(("BACKGROUND", (1, cur_row), (1, cur_row), _ALT))
-
             cur_row += 1
 
         day_end = cur_row - 1
-
-        # Merge DAY cell across all section rows for this day
         style_cmds.append(("SPAN",       (0, day_start), (0, day_end)))
         style_cmds.append(("BACKGROUND", (0, day_start), (0, day_end), _MID))
         style_cmds.append(("LINEBELOW",  (0, day_end),   (-1, day_end), 1.2, colors.HexColor("#334155")))
 
-    # ── Separator column styling ──────────────────────────────────
     for ci, (ctype, _, _) in enumerate(COL_DEFS):
         if ctype == "sep":
             real_col = 2 + ci
@@ -286,29 +237,24 @@ def _generate_pdf_timetable(timetable: dict) -> bytes:
             style_cmds.append(("TEXTCOLOR",  (real_col, 0), (real_col, -1), _GREY))
             style_cmds.append(("FONTSIZE",   (real_col, 1), (real_col, -1), 5))
 
-    # ── Global table style ────────────────────────────────────────
     base_style = TableStyle([
-        # Header row
-        ("BACKGROUND",   (0, 0), (-1, 0),  _DARK),
-        ("TEXTCOLOR",    (0, 0), (-1, 0),  _LIGHT),
-        ("FONTNAME",     (0, 0), (-1, 0),  "Helvetica-Bold"),
-        ("FONTSIZE",     (0, 0), (-1, 0),  6),
-        ("ALIGN",        (0, 0), (-1, 0),  "CENTER"),
-        ("VALIGN",       (0, 0), (-1, 0),  "MIDDLE"),
-        ("TOPPADDING",   (0, 0), (-1, 0),  4),
-        ("BOTTOMPADDING",(0, 0), (-1, 0),  4),
-        # Body
-        ("FONTNAME",     (0, 1), (-1, -1), "Helvetica"),
-        ("FONTSIZE",     (0, 1), (-1, -1), 6),
-        ("ALIGN",        (0, 1), (-1, -1), "CENTER"),
-        ("VALIGN",       (0, 1), (-1, -1), "MIDDLE"),
-        ("TOPPADDING",   (0, 1), (-1, -1), 2),
-        ("BOTTOMPADDING",(0, 1), (-1, -1), 2),
-        # Grid
-        ("GRID",         (0, 0), (-1, -1), 0.3, colors.HexColor("#334155")),
-        # Day col
-        ("BACKGROUND",   (0, 1), (0, -1),  _MID),
-        ("VALIGN",       (0, 1), (0, -1),  "MIDDLE"),
+        ("BACKGROUND",    (0, 0), (-1, 0),  _DARK),
+        ("TEXTCOLOR",     (0, 0), (-1, 0),  _LIGHT),
+        ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
+        ("FONTSIZE",      (0, 0), (-1, 0),  6),
+        ("ALIGN",         (0, 0), (-1, 0),  "CENTER"),
+        ("VALIGN",        (0, 0), (-1, 0),  "MIDDLE"),
+        ("TOPPADDING",    (0, 0), (-1, 0),  4),
+        ("BOTTOMPADDING", (0, 0), (-1, 0),  4),
+        ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
+        ("FONTSIZE",      (0, 1), (-1, -1), 6),
+        ("ALIGN",         (0, 1), (-1, -1), "CENTER"),
+        ("VALIGN",        (0, 1), (-1, -1), "MIDDLE"),
+        ("TOPPADDING",    (0, 1), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 1), (-1, -1), 2),
+        ("GRID",          (0, 0), (-1, -1), 0.3, colors.HexColor("#334155")),
+        ("BACKGROUND",    (0, 1), (0, -1),  _MID),
+        ("VALIGN",        (0, 1), (0, -1),  "MIDDLE"),
     ])
     for cmd in style_cmds:
         base_style.add(*cmd)
@@ -316,7 +262,6 @@ def _generate_pdf_timetable(timetable: dict) -> bytes:
     tbl = Table(table_rows, colWidths=col_widths, repeatRows=1)
     tbl.setStyle(base_style)
 
-    # ── Page header ───────────────────────────────────────────────
     story = [
         Paragraph("SHRI RAM MURTI SMARAK COLLEGE OF ENGINEERING AND TECHNOLOGY", title_st),
         Paragraph(

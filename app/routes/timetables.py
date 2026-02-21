@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, status, Query
+from fastapi import APIRouter, HTTPException, status, Query, Depends
 from bson.objectid import ObjectId
 from datetime import datetime
 from typing import Optional
@@ -11,6 +11,7 @@ from app.models.database import (
     assignment_data_collection,
 )
 from app.services.college_scheduler import get_college_scheduler
+from app.dependencies import get_current_admin
 
 router = APIRouter(prefix="/api/timetables", tags=["timetables"])
 
@@ -35,12 +36,16 @@ def _ser(doc: dict) -> dict:
     return out
 
 
-# ── POST /generate ────────────────────────────────────────────────────────────
+# ── POST /generate  (🔒 auth required) ───────────────────────────────────────
 @router.post("/generate", status_code=status.HTTP_201_CREATED)
-async def generate_timetable(request: GenerateTimetableRequest):
+async def generate_timetable(
+    request: GenerateTimetableRequest,
+    _admin=Depends(get_current_admin),
+):
     """
     Generate a college timetable using OR-Tools CP-SAT.
     Reads master + assignment data from MongoDB, runs solver, stores result.
+    Requires: Authorization: Bearer <token>
     """
     # 1. Verify admin
     try:
@@ -64,12 +69,6 @@ async def generate_timetable(request: GenerateTimetableRequest):
         )
 
     # 3. Load latest assignment data
-    asgn_query = {"admin_email": admin_email}
-    if request.branch:
-        asgn_query["assignments.branch"] = request.branch
-    if request.year:
-        asgn_query["assignments.year"] = request.year
-
     asgn_doc = assignment_data_collection.find_one(
         {"admin_email": admin_email},
         sort=[("created_at", -1)]
@@ -92,12 +91,11 @@ async def generate_timetable(request: GenerateTimetableRequest):
             detail="No assignments match the selected Branch/Year filter."
         )
 
-    # 4. Extract master lists (new schema: classrooms list)
+    # 4. Extract master lists
     teachers   = master.get("teachers", [])
     subjects   = master.get("subjects", [])
     classrooms = master.get("classrooms", [])
 
-    # Fallback: derive from records / assignments if master is sparse
     records = master.get("records", [])
     if not teachers:
         teachers = sorted({r["teacher_name"] for r in records})
@@ -112,27 +110,23 @@ async def generate_timetable(request: GenerateTimetableRequest):
     if not classrooms:
         classrooms = ["R101"]
 
-    # Convert classroom strings to room dicts expected by scheduler
     rooms = [{"room_name": c, "room_type": "lecture"} for c in classrooms]
-
-    # lab_subjects: any subject name containing 'lab' (case-insensitive)
     lab_subjects = [s for s in subjects if "lab" in s.lower()]
 
-    # 5. Determine branch/year for versioning
+    # 5. Versioning
     branches = sorted({a["branch"] for a in assignments})
     years    = sorted({a["year"]   for a in assignments})
     branch_label = request.branch or ",".join(branches)
     year_label   = request.year   or ",".join(years)
 
-    # 6. Auto-increment version
     existing = timetables_collection.count_documents({
-        "admin_id":    request.admin_id,
-        "branch":      branch_label,
-        "year":        year_label,
+        "admin_id": request.admin_id,
+        "branch":   branch_label,
+        "year":     year_label,
     })
     version = existing + 1
 
-    # 7. Run solver
+    # 6. Run solver
     try:
         scheduler = get_college_scheduler()
         timetable = scheduler.allocate(
@@ -147,7 +141,7 @@ async def generate_timetable(request: GenerateTimetableRequest):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Solver error: {exc}")
 
-    # 8. Store
+    # 7. Store
     start_date = request.start_date or datetime.utcnow().strftime("%Y-%m-%d")
     label = f"v{version} — {branch_label} / Year {year_label} — {start_date}"
 
@@ -167,7 +161,7 @@ async def generate_timetable(request: GenerateTimetableRequest):
     return doc
 
 
-# ── GET /user/{user_id}/versions ──────────────────────────────────────────────
+# ── GET /user/{user_id}/versions  (public read) ───────────────────────────────
 @router.get("/user/{user_id}/versions", response_model=list)
 async def get_timetable_versions(
     user_id: str,
@@ -183,7 +177,7 @@ async def get_timetable_versions(
 
     cursor = timetables_collection.find(
         query,
-        {"timetable": 0}   # exclude heavy field
+        {"timetable": 0}
     ).sort("created_at", -1)
 
     versions = []
@@ -200,7 +194,7 @@ async def get_timetable_versions(
     return versions
 
 
-# ── GET /user/{user_id} ───────────────────────────────────────────────────────
+# ── GET /user/{user_id}  (public read) ───────────────────────────────────────
 @router.get("/user/{user_id}", response_model=list)
 async def get_user_timetables(
     user_id: str,
@@ -220,7 +214,7 @@ async def get_user_timetables(
     return [_ser(t) for t in timetables]
 
 
-# ── GET /{timetable_id} ───────────────────────────────────────────────────────
+# ── GET /{timetable_id}  (public read) ───────────────────────────────────────
 @router.get("/{timetable_id}", response_model=dict)
 async def get_timetable(timetable_id: str):
     """Get a single timetable by ID."""
@@ -233,10 +227,13 @@ async def get_timetable(timetable_id: str):
     return _ser(doc)
 
 
-# ── DELETE /{timetable_id} ───────────────────────────────────────────────────
+# ── DELETE /{timetable_id}  (🔒 auth required) ───────────────────────────────
 @router.delete("/{timetable_id}", status_code=status.HTTP_200_OK)
-async def delete_timetable(timetable_id: str):
-    """Delete a timetable."""
+async def delete_timetable(
+    timetable_id: str,
+    _admin=Depends(get_current_admin),
+):
+    """Delete a timetable. Requires: Authorization: Bearer <token>"""
     try:
         result = timetables_collection.delete_one({"_id": ObjectId(timetable_id)})
     except Exception:

@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 import os
 from dotenv import load_dotenv
 
-from app.routes import profiles, timetables, export
+from app.routes import auth, profiles, timetables, export
 from app.routes import upload_master, upload_assignment
 
 load_dotenv()
@@ -28,6 +28,7 @@ app.add_middleware(
 )
 
 # Routers
+app.include_router(auth.router)
 app.include_router(profiles.router)
 app.include_router(timetables.router)
 app.include_router(export.router)
@@ -47,6 +48,7 @@ async def root():
         "version": "2.0.0",
         "endpoints": {
             "health":            "/health",
+            "auth":              "/api/auth/login",
             "profiles":          "/api/profiles",
             "upload_master":     "/api/upload/master",
             "upload_assignment": "/api/upload/assignment",

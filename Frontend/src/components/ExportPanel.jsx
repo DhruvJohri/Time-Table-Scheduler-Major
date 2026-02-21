@@ -1,9 +1,9 @@
 /**
- * ExportPanel — PDF-only export.
+ * ExportPanel — PDF export only via backend.
  */
 
 import { useState } from "react";
-import { downloadExport } from "../api/api";
+import { downloadPDF } from "../api/api";
 import { useToast } from "../context/ToastContext";
 
 function ExportPanel({ timetable }) {
@@ -16,7 +16,7 @@ function ExportPanel({ timetable }) {
     const handlePdf = async () => {
         setLoading(true);
         try {
-            await downloadExport(id, "pdf");
+            await downloadPDF(id);
             showToast("PDF download started", "success");
         } catch (err) {
             showToast(err.response?.data?.detail || err.message || "Export failed", "error");

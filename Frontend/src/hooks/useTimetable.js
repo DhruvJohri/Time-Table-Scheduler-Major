@@ -2,10 +2,12 @@
  * useTimetable — hook owning all college timetable state and actions.
  * Admin profile and active timetable are persisted to localStorage
  * so they survive page refreshes.
+ * Token is kept in module memory only (never localStorage).
  */
 
 import { useState, useCallback, useEffect } from "react";
 import {
+    loginAdmin as apiLogin,
     registerAdmin as apiRegisterAdmin,
     getAdmin as apiGetAdmin,
     uploadMasterData as apiUploadMaster,
@@ -14,21 +16,19 @@ import {
     getTimetable as apiGetTimetable,
     deleteTimetable as apiDeleteTimetable,
     getTimetableVersions as apiGetVersions,
+    setToken,
+    clearToken,
 } from "../api/api";
 
 // ── localStorage helpers ───────────────────────────────────────────────────────
 const LS_ADMIN = "cts_admin";
 const LS_TIMETABLE = "cts_timetable";
 
-const lsGet = (key) => {
-    try { return JSON.parse(localStorage.getItem(key)); } catch { return null; }
-};
-const lsSet = (key, val) => {
-    try { localStorage.setItem(key, JSON.stringify(val)); } catch { }
-};
+const lsGet = (key) => { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } };
+const lsSet = (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch { } };
 const lsDel = (key) => { try { localStorage.removeItem(key); } catch { } };
 
-// ── Shared loading/error wrapper ───────────────────────────────────────────────
+// ── Loading/error wrapper ──────────────────────────────────────────────────────
 const wrap = (setLoading, setError) => async (fn) => {
     setLoading(true);
     setError(null);
@@ -44,7 +44,6 @@ const wrap = (setLoading, setError) => async (fn) => {
 };
 
 export default function useTimetable() {
-    // Restore from localStorage on first render
     const [admin, setAdminState] = useState(() => lsGet(LS_ADMIN));
     const [timetable, setTimetableState] = useState(() => lsGet(LS_TIMETABLE));
     const [versions, setVersions] = useState([]);
@@ -74,12 +73,24 @@ export default function useTimetable() {
         }
     }, [admin?.id]);
 
+    // ── Login (email + password → JWT) ────────────────────────────────────────
+    const login = useCallback(async (email, password) =>
+        run(async () => {
+            const { data } = await apiLogin(email, password);
+            setToken(data.access_token);
+            setAdmin(data.admin);
+            return data;
+        }), [run, setAdmin]);
+
     // ── Admin Profile ─────────────────────────────────────────────────────────
     const registerAdmin = useCallback(async (data) =>
         run(async () => {
             const { data: created } = await apiRegisterAdmin(data);
-            setAdmin(created);
-            return created;
+            // Immediately log in to obtain a token after registration
+            const { data: tokenData } = await apiLogin(data.email, data.password);
+            setToken(tokenData.access_token);
+            setAdmin(tokenData.admin);
+            return tokenData.admin;
         }), [run, setAdmin]);
 
     const loadAdmin = useCallback(async (email) =>
@@ -93,6 +104,7 @@ export default function useTimetable() {
         setAdmin(null);
         setTimetable(null);
         setVersions([]);
+        clearToken();
     }, [setAdmin, setTimetable]);
 
     // ── Upload Master Data ────────────────────────────────────────────────────
@@ -114,7 +126,6 @@ export default function useTimetable() {
         run(async () => {
             const { data } = await apiGenerate(payload);
             setTimetable(data);
-            // Refresh versions after generating
             if (payload.admin_id) {
                 const { data: vers } = await apiGetVersions(payload.admin_id);
                 setVersions(Array.isArray(vers) ? vers : []);
@@ -135,7 +146,6 @@ export default function useTimetable() {
         run(async () => {
             await apiDeleteTimetable(id);
             setVersions((prev) => prev.filter((v) => v.id !== id));
-            // Clear active timetable if the deleted version was loaded
             setTimetableState((prev) => {
                 if (prev?.id === id) { lsDel(LS_TIMETABLE); return null; }
                 return prev;
@@ -152,7 +162,7 @@ export default function useTimetable() {
 
     return {
         admin, timetable, versions, loading, error,
-        registerAdmin, loadAdmin, logoutAdmin,
+        login, registerAdmin, loadAdmin, logoutAdmin,
         uploadMaster, uploadAssignment,
         generateTimetable,
         fetchVersions, loadVersion, deleteVersion,

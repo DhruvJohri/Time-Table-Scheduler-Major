@@ -1,5 +1,3 @@
-
-
 import { useCallback, useState } from "react";
 import useTimetable from "./hooks/useTimetable";
 import UploadPanel from "./components/UploadPanel";
@@ -8,11 +6,13 @@ import HistoryPanel from "./components/HistoryPanel";
 import ExportPanel from "./components/ExportPanel";
 import { useToast } from "./context/ToastContext";
 
-// ── Add Profile slide-in form ─────────────────────────────────────────────────
+// ── Add / Switch Profile Modal ─────────────────────────────────────────────────
 const ROLES = ["Admin", "Coordinator", "HOD", "Principal"];
 
 function AddProfileModal({ onSave, onClose, loading }) {
-    const [form, setForm] = useState({ name: "", email: "", college_name: "", role: "Admin" });
+    const [form, setForm] = useState({
+        name: "", email: "", college_name: "", role: "Admin", password: "",
+    });
     const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
     return (
@@ -31,6 +31,16 @@ function AddProfileModal({ onSave, onClose, loading }) {
                         </select>
                     </label>
                 </div>
+                <div className="form-row">
+                    <label style={{ width: "100%" }}>Password
+                        <input
+                            type="password" value={form.password}
+                            onChange={(e) => set("password", e.target.value)}
+                            placeholder="Choose a secure password" required
+                            style={{ width: "100%" }}
+                        />
+                    </label>
+                </div>
                 <div className="modal-actions">
                     <button className="btn-outline" onClick={onClose}>Cancel</button>
                     <button className="btn-primary" onClick={() => onSave(form)} disabled={loading}>
@@ -47,7 +57,7 @@ function Dashboard() {
     const { showToast } = useToast();
     const {
         admin, timetable, versions, loading, error,
-        registerAdmin,
+        login, registerAdmin,
         uploadMaster, uploadAssignment,
         generateTimetable,
         fetchVersions, loadVersion, deleteVersion,
@@ -57,12 +67,12 @@ function Dashboard() {
 
     const [showAddProfile, setShowAddProfile] = useState(false);
 
-    // ── Register admin (from modal or UploadPanel) ───────────────────────────
+    // ── Register (create) admin profile → auto-login ──────────────────────────
     const handleRegisterAdmin = useCallback(async (formData) => {
         try {
             const created = await registerAdmin(formData);
             setShowAddProfile(false);
-            showToast("Profile saved!", "success");
+            showToast("Profile saved — you are now logged in.", "success");
             return created;
         } catch (err) {
             showToast(err.message, "error");
@@ -70,18 +80,14 @@ function Dashboard() {
         }
     }, [registerAdmin, showToast]);
 
-    // ── Combined upload + generate ───────────────────────────────────────────
+    // ── Combined upload + generate ────────────────────────────────────────────
     const handleUploadAndGenerate = useCallback(async ({ masterFile, assignmentFile, branch, year }) => {
         const currentAdmin = admin;
         if (!currentAdmin) throw new Error("Admin profile not set.");
 
-        // Step 1: upload master data
         const masterResult = await uploadMaster(masterFile, currentAdmin.email);
-
-        // Step 2: upload assignment data (pass email so backend can look up admin)
         const assignResult = await uploadAssignment(assignmentFile, currentAdmin.email);
 
-        // Step 3: generate
         await generateTimetable({
             admin_id: currentAdmin.id || currentAdmin._id,
             branch: branch || undefined,
@@ -111,18 +117,11 @@ function Dashboard() {
                             </div>
                         </div>
                     )}
-                    <button
-                        className="btn-add-profile"
-                        onClick={() => setShowAddProfile(true)}
-                    >
+                    <button className="btn-add-profile" onClick={() => setShowAddProfile(true)}>
                         ➕ {admin ? "Switch Profile" : "Add Profile"}
                     </button>
                     {admin && (
-                        <button
-                            className="btn-outline small"
-                            onClick={logoutAdmin}
-                            title="Sign out / clear profile"
-                        >
+                        <button className="btn-outline small" onClick={logoutAdmin} title="Sign out / clear profile">
                             Sign out
                         </button>
                     )}
@@ -138,11 +137,11 @@ function Dashboard() {
 
             {/* ── Main layout ── */}
             <div className="dashboard-body">
-                {/* Sidebar */}
                 <aside className="sidebar">
                     <UploadPanel
                         admin={admin}
                         onRegisterAdmin={handleRegisterAdmin}
+                        onLogin={login}
                         onUploadAndGenerate={handleUploadAndGenerate}
                         loading={loading}
                     />
@@ -157,7 +156,6 @@ function Dashboard() {
                     <ExportPanel timetable={timetable} />
                 </aside>
 
-                {/* Content */}
                 <main className="main-content">
                     {loading && !timetable && (
                         <div className="loading-state">
@@ -165,7 +163,6 @@ function Dashboard() {
                             <p>Running OR-Tools CP-SAT solver…</p>
                         </div>
                     )}
-
                     {!loading && !timetable && (
                         <div className="empty-state">
                             <div className="empty-icon">📅</div>
@@ -176,7 +173,6 @@ function Dashboard() {
                             </p>
                         </div>
                     )}
-
                     {timetable && <TimetableGrid timetable={timetable} />}
                 </main>
             </div>
