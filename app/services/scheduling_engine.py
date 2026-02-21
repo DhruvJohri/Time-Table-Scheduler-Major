@@ -73,6 +73,29 @@ class SchedulerEngine:
         # Get all subjects
         all_subjects = self.db.query(Subject).filter(Subject.is_active == True).all()
         
+        # Compute capacity vs demand metadata
+        try:
+            # Determine periods per day from constraint config if present
+            from app.models.models import ConstraintConfig
+            cfg = self.db.query(ConstraintConfig).order_by(ConstraintConfig.id.desc()).first()
+            periods_per_day = cfg.periods_per_day if cfg else 7
+        except Exception:
+            periods_per_day = 7
+
+        days_count = len(self.DAYS)
+        # Reserved club slots per section (Thursday P1 and P7)
+        reserved_per_section = 2
+        capacity = days_count * periods_per_day - reserved_per_section
+
+        # Compute total demand (sum of required periods across subjects)
+        total_demand = 0
+        for s in all_subjects:
+            total_demand += (s.lectures_per_week or 0) + (s.tutorials_per_week or 0) + (s.lab_periods_per_week or 0) + (s.seminar_periods_per_week or 0)
+
+        expected_empty = capacity - total_demand
+
+        logger.info(f"Scheduler capacity={capacity}, demand={total_demand}, expected_empty={expected_empty}")
+        
         # Group by branch-year-section and normalize
         if not all_subjects:
             return False, {
@@ -125,7 +148,10 @@ class SchedulerEngine:
             "conflicts": len(conflicts),
             "generation_time_ms": int(generation_time),
             "backtrack_count": self.backtrack_count,
-            "failed_subjects": self.failed_subjects
+            "failed_subjects": self.failed_subjects,
+            "capacity": capacity,
+            "demand": total_demand,
+            "expected_empty": expected_empty
         }
         
         return report["success"], report

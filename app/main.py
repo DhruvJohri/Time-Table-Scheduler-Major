@@ -10,7 +10,7 @@ import os
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 
-from app.routes import timetables
+from app.routes import timetables, upload
 from app.models.database import init_db
 
 load_dotenv()
@@ -46,6 +46,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(timetables.router)
+app.include_router(upload.router)
 
 
 # Health check endpoint

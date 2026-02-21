@@ -1,129 +1,169 @@
 """
-API routes for timetable generation and management.
+Timetable generation and management API.
+Frozen spec compliant (6 days × 7 periods, deterministic grid).
 """
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List, Optional
 from datetime import datetime
+from typing import Dict, List
 
 from app.models.database import get_db
 from app.models.models import (
-    TimetableEntry, Subject, Faculty, Classroom, LabRoom,
-    Branch, YearSection, ScheduleMetadata, DayOfWeek, SessionType
+    TimetableEntry,
+    Subject,
+    Faculty,
+    Classroom,
+    LabRoom,
+    Branch,
+    YearSection,
+    ScheduleMetadata,
+    DayOfWeek,
+    SessionType,
 )
 from app.schemas.schemas import (
-    GenerateScheduleRequest, ScheduleGenerationResponse, TimetableEntryResponse,
-    TimetableViewBranchYearSection, TimetableDisplayEntry, ValidationReport,
-    ConflictReport, ScheduleStatistics, ErrorResponse
+    GenerateScheduleRequest,
+    ScheduleGenerationResponse,
+    ValidationReport,
+    ConflictReport,
+    ScheduleStatistics,
 )
 from app.services.scheduling_engine import SchedulerEngine
 from app.services.validators import ConstraintValidator
 
 router = APIRouter(prefix="/api/timetable", tags=["timetable"])
 
-
+# =========================================================
+# GENERATE TIMETABLE
+# =========================================================
 @router.post("/generate", response_model=ScheduleGenerationResponse)
 async def generate_timetable(
     request: GenerateScheduleRequest,
     db: Session = Depends(get_db),
-    background_tasks: BackgroundTasks = None
 ):
     """
-    Generate a timetable for all branches.
-    
-    - **seed**: Optional seed for deterministic scheduling
-    - **force_regenerate**: If True, clears existing timetable first
-    - **include_clubs**: If True, schedules club activities
+    Generate timetable (always fresh).
+    Frozen rules:
+    - 6 days
+    - 7 periods
+    - clean regenerate
     """
     try:
-        # Create scheduler
         scheduler = SchedulerEngine(db, seed=request.seed)
-        
-        # Clear if requested
-        if request.force_regenerate:
-            db.query(TimetableEntry).delete()
-            db.commit()
-        
-        # Schedule all subjects
-        success, report = scheduler.schedule_all(force_clear=False)
-        
-        # Schedule clubs if requested
+
+        # ALWAYS clear existing timetable
+        db.query(TimetableEntry).delete()
+        db.commit()
+
+        # Run scheduler
+        success, report = scheduler.schedule_all()
+
+        # Clubs optional
         if request.include_clubs:
             scheduler.schedule_clubs()
-        
+
+        # Final conflict validation
+        validator = ConstraintValidator(db)
+        is_valid, conflicts = validator.validate_full_schedule()
+
+        # Compute final success
+        success = success and is_valid
+
         # Save metadata
         metadata = ScheduleMetadata(
             generated_at=datetime.utcnow(),
             generation_seed=request.seed,
             generation_time_ms=report.get("generation_time_ms", 0),
             is_valid=success,
-            conflict_count=report.get("conflicts", 0),
-            unallocated_subjects_count=report.get("failed", 0)
+            conflict_count=len(conflicts),
+            unallocated_subjects_count=report.get("unallocated_count", 0),
+            capacity=report.get("capacity"),
+            demand=report.get("demand"),
+            expected_empty=report.get("expected_empty"),
         )
         db.add(metadata)
         db.commit()
-        
+
         return ScheduleGenerationResponse(
             success=success,
             message=report.get("message", "Timetable generated"),
             generation_time_ms=report.get("generation_time_ms"),
-            conflict_count=report.get("conflicts", 0),
-            unallocated_subjects=report.get("failed", 0),
-            failed_subjects=[f[0] for f in report.get("failed_subjects", [])]
+            conflict_count=len(conflicts),
+            unallocated_subjects=report.get("unallocated_count", 0),
+            failed_subjects=report.get("failed_subjects", []),
+            capacity=report.get("capacity"),
+            demand=report.get("demand"),
+            expected_empty=report.get("expected_empty"),
         )
-    
+
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error generating timetable: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("", response_model=dict)
+# =========================================================
+# FULL TIMETABLE
+# =========================================================
+@router.get("")
 async def get_full_timetable(db: Session = Depends(get_db)):
     """
-    Get the complete generated timetable.
+    Return all timetable entries grouped by day.
     """
     try:
         entries = db.query(TimetableEntry).all()
-        
+
         if not entries:
-            return {
-                "total_entries": 0,
-                "days": [],
-                "message": "No timetable generated yet"
-            }
-        
-        # Group by day
-        timetable_by_day = {}
-        for entry in entries:
-            day = entry.day_of_week.value
-            if day not in timetable_by_day:
-                timetable_by_day[day] = []
-            
-            timetable_by_day[day].append({
-                "period": entry.period_number,
-                "branch": entry.branch.code if entry.branch else None,
-                "year_section": f"{entry.year_section.year}{entry.year_section.section}" if entry.year_section else None,
-                "subject": entry.subject.code if entry.subject else None,
-                "faculty": entry.faculty.name if entry.faculty else None,
-                "classroom": entry.classroom.room_number if entry.classroom else None,
-                "labroom": entry.labroom.room_number if entry.labroom else None,
-                "type": entry.session_type.value
-            })
-        
+            return {"total_entries": 0, "days": {}}
+
+        timetable: Dict[str, List] = {}
+
+        for e in entries:
+            day = e.day_of_week.value
+            timetable.setdefault(day, []).append(
+                {
+                    "period": e.period_number,
+                    "branch": e.branch.code if e.branch else None,
+                    "year_section": f"{e.year_section.year}{e.year_section.section}"
+                    if e.year_section
+                    else None,
+                    "subject": e.subject.code if e.subject else None,
+                    "faculty": e.faculty.name if e.faculty else None,
+                    "classroom": e.classroom.room_number if e.classroom else None,
+                    "labroom": e.labroom.room_number if e.labroom else None,
+                    "type": e.session_type.value,
+                }
+            )
+
         return {
             "total_entries": len(entries),
-            "days": timetable_by_day,
-            "generated_at": entries[0].created_at if entries else None
+            "days": timetable,
+            "generated_at": entries[0].created_at,
         }
-    
+
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error retrieving timetable: {str(e)}"
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =========================================================
+# BRANCH TIMETABLE
+# =========================================================
+def _get_branch_section(db: Session, branch_code: str, year: int, section: str):
+    branch = db.query(Branch).filter(Branch.code == branch_code).first()
+    if not branch:
+        raise HTTPException(404, f"Branch {branch_code} not found")
+
+    ys = (
+        db.query(YearSection)
+        .filter(
+            YearSection.branch_id == branch.id,
+            YearSection.year == year,
+            YearSection.section == section,
         )
+        .first()
+    )
+    if not ys:
+        raise HTTPException(404, f"{branch_code} {year}{section} not found")
+
+    return branch, ys
 
 
 @router.get("/{branch_code}/{year}/{section}")
@@ -131,203 +171,207 @@ async def get_branch_timetable(
     branch_code: str,
     year: int,
     section: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
-    Get timetable for a specific branch, year, and section.
+    Branch/year/section timetable list.
     """
     try:
-        # Find branch
-        branch = db.query(Branch).filter(Branch.code == branch_code).first()
-        if not branch:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Branch {branch_code} not found"
+        branch, ys = _get_branch_section(db, branch_code, year, section)
+
+        entries = (
+            db.query(TimetableEntry)
+            .filter(
+                TimetableEntry.branch_id == branch.id,
+                TimetableEntry.year_section_id == ys.id,
             )
-        
-        # Find year section
-        year_section = db.query(YearSection).filter(
-            YearSection.branch_id == branch.id,
-            YearSection.year == year,
-            YearSection.section == section
-        ).first()
-        
-        if not year_section:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Year/Section {year}{section} not found for {branch_code}"
-            )
-        
-        # Get entries
-        entries = db.query(TimetableEntry).filter(
-            TimetableEntry.branch_id == branch.id,
-            TimetableEntry.year_section_id == year_section.id
-        ).order_by(
-            TimetableEntry.day_of_week,
-            TimetableEntry.period_number
-        ).all()
-        
-        if not entries:
-            return {
-                "branch": branch_code,
-                "year": year,
-                "section": section,
-                "entries": [],
-                "message": "No timetable entries found"
+            .order_by(TimetableEntry.day_of_week, TimetableEntry.period_number)
+            .all()
+        )
+
+        result = [
+            {
+                "day": e.day_of_week.value,
+                "period": e.period_number,
+                "subject": e.subject.code if e.subject else None,
+                "subject_name": e.subject.name if e.subject else None,
+                "faculty": e.faculty.name if e.faculty else None,
+                "classroom": e.classroom.room_number if e.classroom else None,
+                "labroom": e.labroom.room_number if e.labroom else None,
+                "type": e.session_type.value,
+                "locked": e.is_locked,
             }
-        
-        # Format entries
-        formatted_entries = []
-        for entry in entries:
-            formatted_entries.append({
-                "day": entry.day_of_week.value,
-                "period": entry.period_number,
-                "subject": entry.subject.code if entry.subject else None,
-                "subject_name": entry.subject.name if entry.subject else None,
-                "faculty": entry.faculty.name if entry.faculty else None,
-                "classroom": entry.classroom.room_number if entry.classroom else None,
-                "labroom": entry.labroom.room_number if entry.labroom else None,
-                "type": entry.session_type.value,
-                "locked": entry.is_locked
-            })
-        
+            for e in entries
+        ]
+
         return {
             "branch": branch_code,
             "year": year,
             "section": section,
-            "entries": formatted_entries,
-            "total": len(formatted_entries)
+            "entries": result,
+            "total": len(result),
         }
-    
-    except HTTPException:
-        raise
+
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error retrieving timetable: {str(e)}"
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =========================================================
+# MATRIX GRID (STABLE UI)
+# =========================================================
+@router.get("/{branch_code}/{year}/{section}/matrix")
+async def get_branch_timetable_matrix(
+    branch_code: str,
+    year: int,
+    section: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Frozen grid: Mon–Sat × 7 periods.
+    Explicit empty slots included.
+    """
+    try:
+        branch, ys = _get_branch_section(db, branch_code, year, section)
+
+        days = [d.value for d in DayOfWeek]
+        periods = list(range(1, 8))
+
+        grid = {day: {p: None for p in periods} for day in days}
+
+        entries = db.query(TimetableEntry).filter(
+            TimetableEntry.branch_id == branch.id,
+            TimetableEntry.year_section_id == ys.id,
         )
 
+        for e in entries:
+            grid[e.day_of_week.value][e.period_number] = {
+                "subject_code": e.subject.code if e.subject else None,
+                "subject_name": e.subject.name if e.subject else None,
+                "faculty": e.faculty.name if e.faculty else None,
+                "type": e.session_type.value,
+                "classroom": e.classroom.room_number if e.classroom else None,
+                "labroom": e.labroom.room_number if e.labroom else None,
+                "locked": e.is_locked,
+            }
 
+        return {
+            "branch": branch_code,
+            "year": year,
+            "section": section,
+            "days": days,
+            "periods": periods,
+            "grid": grid,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =========================================================
+# CLEAR
+# =========================================================
 @router.delete("/clear")
 async def clear_timetable(db: Session = Depends(get_db)):
-    """
-    Clear all timetable entries (use with caution).
-    """
     try:
         count = db.query(TimetableEntry).delete()
         db.commit()
-        return {
-            "success": True,
-            "message": f"Cleared {count} timetable entries"
-        }
+        return {"success": True, "cleared": count}
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error clearing timetable: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
 
 
+# =========================================================
+# VALIDATE
+# =========================================================
 @router.post("/validate", response_model=ValidationReport)
 async def validate_schedule(db: Session = Depends(get_db)):
     """
-    Validate the current schedule for conflicts.
+    Full constraint validation + required allocation counts.
     """
     try:
         validator = ConstraintValidator(db)
         is_valid, conflicts = validator.validate_full_schedule()
-        
-        # Get unallocated subjects
-        all_subjects = db.query(Subject).filter(Subject.is_active == True).all()
-        allocated_subject_ids = set()
-        
-        entries = db.query(TimetableEntry).all()
-        for entry in entries:
-            if entry.subject_id:
-                allocated_subject_ids.add(entry.subject_id)
-        
+
+        # required vs scheduled counts
+        required_map = validator.required_subject_counts()
+        scheduled_map = validator.scheduled_subject_counts()
+
         unallocated = [
-            s.code for s in all_subjects
-            if s.id not in allocated_subject_ids
+            subj for subj, req in required_map.items()
+            if scheduled_map.get(subj, 0) < req
         ]
-        
-        # Format conflicts
+
         formatted_conflicts = [
             ConflictReport(
-                conflict_type="Faculty" if "Faculty" in conflict else "Classroom" if "Classroom" in conflict else "Lab Room",
+                conflict_type="General",
                 day_of_week="",
                 period_number=0,
                 involved_subjects=[],
-                description=conflict
+                description=c,
             )
-            for conflict in conflicts
+            for c in conflicts
         ]
-        
-        total_subjects = len(all_subjects)
-        allocated_count = len(allocated_subject_ids)
-        allocation_percentage = (allocated_count / total_subjects * 100) if total_subjects > 0 else 0
-        
+
+        total = len(required_map)
+        allocated = total - len(unallocated)
+        percent = (allocated / total * 100) if total else 0
+
         return ValidationReport(
             is_valid=is_valid,
             total_conflicts=len(conflicts),
             conflicts=formatted_conflicts,
             unallocated_subjects=unallocated,
-            allocation_percentage=allocation_percentage
+            allocation_percentage=percent,
         )
-    
+
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error validating schedule: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
 
 
+# =========================================================
+# STATISTICS
+# =========================================================
 @router.get("/statistics", response_model=ScheduleStatistics)
 async def get_schedule_statistics(db: Session = Depends(get_db)):
     """
-    Get statistics about the generated schedule.
+    Timetable resource utilization statistics.
     """
     try:
-        # Count entries by type
         total_entries = db.query(TimetableEntry).count()
-        lectures = db.query(TimetableEntry).filter(
-            TimetableEntry.session_type == SessionType.LECTURE
-        ).count()
-        tutorials = db.query(TimetableEntry).filter(
-            TimetableEntry.session_type == SessionType.TUTORIAL
-        ).count()
-        labs = db.query(TimetableEntry).filter(
-            TimetableEntry.session_type == SessionType.LAB
-        ).count()
-        seminars = db.query(TimetableEntry).filter(
-            TimetableEntry.session_type == SessionType.SEMINAR
-        ).count()
-        clubs = db.query(TimetableEntry).filter(
-            TimetableEntry.session_type == SessionType.CLUB
-        ).count()
-        
-        # Count resources
+
+        def count_type(t):
+            return db.query(TimetableEntry).filter(
+                TimetableEntry.session_type == t
+            ).count()
+
+        lectures = count_type(SessionType.LECTURE)
+        tutorials = count_type(SessionType.TUTORIAL)
+        labs = count_type(SessionType.LAB)
+        seminars = count_type(SessionType.SEMINAR)
+        clubs = count_type(SessionType.CLUB)
+
         total_subjects = db.query(Subject).filter(Subject.is_active == True).count()
         total_branches = db.query(Branch).count()
         total_faculty = db.query(Faculty).filter(Faculty.is_active == True).count()
         total_classrooms = db.query(Classroom).filter(Classroom.is_active == True).count()
         total_labrooms = db.query(LabRoom).filter(LabRoom.is_active == True).count()
-        
-        # Calculate utilization (simplified)
-        faculty_slots_used = db.query(TimetableEntry).filter(
+
+        slots_per_week = 42  # 6 × 7
+
+        faculty_slots = db.query(TimetableEntry).filter(
             TimetableEntry.faculty_id.isnot(None)
         ).count()
-        classroom_slots_used = db.query(TimetableEntry).filter(
-            TimetableEntry.classroom_id.isnot(None),
-            TimetableEntry.session_type != SessionType.CLUB
+        classroom_slots = db.query(TimetableEntry).filter(
+            TimetableEntry.classroom_id.isnot(None)
         ).count()
-        labroom_slots_used = db.query(TimetableEntry).filter(
+        labroom_slots = db.query(TimetableEntry).filter(
             TimetableEntry.labroom_id.isnot(None)
         ).count()
-        
-        faculty_utilization = (faculty_slots_used / (total_faculty * 42)) * 100 if total_faculty > 0 else 0  # 6 days * 7 periods
-        classroom_utilization = (classroom_slots_used / (total_classrooms * 42)) * 100 if total_classrooms > 0 else 0
-        labroom_utilization = (labroom_slots_used / (total_labrooms * 42)) * 100 if total_labrooms > 0 else 0
-        
+
+        faculty_util = min(100, (faculty_slots / (total_faculty * slots_per_week)) * 100) if total_faculty else 0
+        classroom_util = min(100, (classroom_slots / (total_classrooms * slots_per_week)) * 100) if total_classrooms else 0
+        labroom_util = min(100, (labroom_slots / (total_labrooms * slots_per_week)) * 100) if total_labrooms else 0
+
         return ScheduleStatistics(
             total_entries=total_entries,
             total_subjects=total_subjects,
@@ -340,13 +384,10 @@ async def get_schedule_statistics(db: Session = Depends(get_db)):
             labs_scheduled=labs,
             seminars_scheduled=seminars,
             clubs_scheduled=clubs,
-            faculty_utilization=min(100, faculty_utilization),
-            classroom_utilization=min(100, classroom_utilization),
-            labroom_utilization=min(100, labroom_utilization)
+            faculty_utilization=faculty_util,
+            classroom_utilization=classroom_util,
+            labroom_utilization=labroom_util,
         )
-    
+
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error retrieving statistics: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
