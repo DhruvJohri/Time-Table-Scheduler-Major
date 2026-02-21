@@ -277,7 +277,7 @@ class SchedulerEngine:
             
             # Lectures can be in any period, but preferably not after labs
             if day == DayOfWeek.THURSDAY:
-                if period in [1, 7]:  # Clubs only
+                if period == 7:  # P7 clubs only
                     continue
             
             can_place, error = self.validator.can_schedule_lecture_or_tutorial(
