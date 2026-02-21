@@ -448,8 +448,8 @@ body {
     }
 }
 
-/* ── History Panel ── */
-.history-panel {}
+
+
 
 .history-filters {
     display: flex;
@@ -977,4 +977,256 @@ body {
     gap: .35rem;
     align-items: center;
     flex-shrink: 0;
+}
+
+/* ── Toast notifications (vanilla CSS — no Tailwind) ── */
+.toast-container {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    gap: .5rem;
+    pointer-events: none;
+}
+
+.toast {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    min-width: 220px;
+    max-width: 360px;
+    border-radius: 10px;
+    padding: .65rem 1rem;
+    font-size: .82rem;
+    font-weight: 500;
+    color: #fff;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, .35);
+    animation: toast-in .2s ease;
+    pointer-events: auto;
+}
+
+@keyframes toast-in {
+    from {
+        transform: translateX(40px);
+        opacity: 0;
+    }
+
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+.toast-success {
+    background: linear-gradient(135deg, #065f46, #047857);
+    border-left: 3px solid #10b981;
+}
+
+.toast-error {
+    background: linear-gradient(135deg, #7f1d1d, #991b1b);
+    border-left: 3px solid #ef4444;
+}
+
+.toast-info {
+    background: linear-gradient(135deg, #1e3a5f, #1e40af);
+    border-left: 3px solid #3b82f6;
+}
+
+.toast-icon {
+    font-size: 1rem;
+    flex-shrink: 0;
+}
+
+.toast-msg {
+    flex: 1;
+    line-height: 1.3;
+}
+
+/* ── Session type badges (replaces old .tt-lab-badge) ── */
+.tt-type-badge {
+    display: inline-block;
+    border-radius: 3px;
+    padding: 0 .25rem;
+    font-size: .55rem;
+    font-weight: 800;
+    vertical-align: middle;
+    margin-left: .25rem;
+    line-height: 1.5;
+    letter-spacing: .3px;
+}
+
+/* LAB → indigo */
+.badge-lab {
+    background: #312e81;
+    color: #a5b4fc;
+}
+
+/* TUTORIAL → teal */
+.badge-tutorial {
+    background: #064e3b;
+    color: #34d399;
+}
+
+/* SEMINAR → amber */
+.badge-seminar {
+    background: #78350f;
+    color: #fcd34d;
+}
+
+/* CLUB → purple */
+.badge-club {
+    background: #4c1d95;
+    color: #c4b5fd;
+}
+
+/* LECTURE → slate (subtle) */
+.badge-lecture {
+    background: #1e293b;
+    color: #94a3b8;
+}
+
+/* Type-tinted occupied cells */
+.tt-slot-cell.has-type-lab {
+    background: rgba(99, 102, 241, .07);
+}
+
+.tt-slot-cell.has-type-tutorial {
+    background: rgba(16, 185, 129, .06);
+}
+
+.tt-slot-cell.has-type-seminar {
+    background: rgba(245, 158, 11, .06);
+}
+
+.tt-slot-cell.has-type-club,
+.tt-slot-cell.club-activity {
+    background: rgba(139, 92, 246, .08);
+}
+
+/* ── Filter bar (in TimetableGrid) ── */
+.tt-filter-bar {
+    display: flex;
+    gap: .75rem;
+    padding: .6rem 1rem;
+    background: #111827;
+    border-bottom: 1px solid rgba(148, 163, 184, .1);
+    flex-wrap: wrap;
+}
+
+.tt-filter-bar label {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    font-size: .72rem;
+    color: #64748b;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .4px;
+}
+
+.tt-filter-bar select {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    color: #e2e8f0;
+    padding: .25rem .5rem;
+    font-size: .75rem;
+    font-family: inherit;
+    outline: none;
+    cursor: pointer;
+    transition: border-color .15s;
+}
+
+.tt-filter-bar select:focus {
+    border-color: #6366f1;
+}
+
+/* ── Session type legend row (in TimetableGrid) ── */
+.tt-legend-row {
+    display: flex;
+    gap: .5rem;
+    align-items: center;
+    padding: .4rem 1rem;
+    background: #0f172a;
+    border-bottom: 1px solid rgba(148, 163, 184, .08);
+    flex-wrap: wrap;
+}
+
+.tt-legend-row .tt-legend-chip {
+    font-size: .65rem;
+    font-weight: 700;
+    border-radius: 4px;
+    padding: .15rem .5rem;
+    border: none;
+}
+
+/* ── Empty state steps (onboarding guide) ── */
+.empty-state {
+    flex-direction: column;
+}
+
+.loading-sub {
+    font-size: .78rem;
+    color: #475569;
+    margin-top: .25rem;
+}
+
+.empty-steps {
+    margin-top: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: .6rem;
+    text-align: left;
+    max-width: 320px;
+}
+
+.empty-step {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    font-size: .82rem;
+    color: #64748b;
+}
+
+.empty-step-num {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    color: #fff;
+    font-weight: 700;
+    font-size: .72rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+/* ── Partial schedule warning (Integration Guide §10) ── */
+.partial-banner {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    flex-wrap: wrap;
+    padding: .5rem 1.5rem;
+    background: rgba(245, 158, 11, .12);
+    border-bottom: 2px solid #f59e0b;
+    color: #fcd34d;
+    font-size: .8rem;
+}
+
+.partial-banner strong {
+    color: #fbbf24;
+}
+
+.partial-banner .dismiss-btn {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: #f59e0b;
+    cursor: pointer;
+    font-size: .85rem;
+    padding: 0 .2rem;
 }

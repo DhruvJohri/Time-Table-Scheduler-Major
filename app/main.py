@@ -47,14 +47,17 @@ async def root():
         "name": "College Timetable Generator",
         "version": "2.0.0",
         "endpoints": {
-            "health":            "/health",
-            "auth":              "/api/auth/login",
-            "profiles":          "/api/profiles",
-            "upload_master":     "/api/upload/master",
-            "upload_assignment": "/api/upload/assignment",
-            "timetables":        "/api/timetables",
-            "export":            "/api/export",
-            "docs":              "/docs",
+            "health":                          "/health",
+            "auth":                            "/api/auth/login",
+            "profiles":                        "/api/profiles",
+            "upload_master":                   "/api/upload/master",
+            "upload_assignment":               "/api/upload/assignment",
+            "generate_timetable":              "POST /timetable/generate",
+            "get_all_timetables":              "GET  /timetable",
+            "get_by_branch_year_section":      "GET  /timetable/{branch}/{year}/{section}",
+            "clear_all_timetables":            "DELETE /timetable/clear",
+            "export":                          "/api/export",
+            "docs":                            "/docs",
         }
     }
 

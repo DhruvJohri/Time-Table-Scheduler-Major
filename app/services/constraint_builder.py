@@ -1,6 +1,8 @@
 """
 Constraint Builder Module
 Applies academic scheduling constraints to the OR-Tools CP-SAT model.
+Guide compliant: hard lab P1/P2 block, consecutive lab, faculty/room uniqueness,
+Thursday P1+P7 club reservation, weekly load.
 """
 
 from ortools.sat.python import cp_model
@@ -24,29 +26,33 @@ PERIOD_TIMES = {
 class ConstraintBuilder:
     """
     Applies domain-specific college scheduling constraints to a CP-SAT model.
+
+    Variable key tuple layout:
+        (teacher, subject, branch, year, section, day, period, room)
+          [0]      [1]      [2]    [3]   [4]      [5]  [6]     [7]
     """
 
     def __init__(
         self,
-        model:       cp_model.CpModel,
-        x:           Dict,          # x[(teacher, subject, branch, year, day, period, room)] = BoolVar
-        teachers:    List[str],
-        subjects:    List[str],
-        rooms:       List[str],
-        branches:    List[str],
-        years:       List[str],
-        assignments: List[Dict[str, Any]],  # {teacher, subject, branch, year, lectures_per_week}
+        model:        cp_model.CpModel,
+        x:            Dict,          # x[(teacher, subject, branch, year, section, day, period, room)]
+        teachers:     List[str],
+        subjects:     List[str],
+        rooms:        List[str],
+        branches:     List[str],
+        years:        List[str],
+        assignments:  List[Dict[str, Any]],
         lab_subjects: List[str],
-        cs_subjects:  List[str],    # subjects with CS split (CS1/CS2)
+        cs_subjects:  List[str],
     ):
-        self.model       = model
-        self.x           = x
-        self.teachers    = teachers
-        self.subjects    = subjects
-        self.rooms       = rooms
-        self.branches    = branches
-        self.years       = years
-        self.assignments = assignments
+        self.model        = model
+        self.x            = x
+        self.teachers     = teachers
+        self.subjects     = subjects
+        self.rooms        = rooms
+        self.branches     = branches
+        self.years        = years
+        self.assignments  = assignments
         self.lab_subjects = lab_subjects
         self.cs_subjects  = cs_subjects
 
@@ -54,46 +60,48 @@ class ConstraintBuilder:
         self._teacher_uniqueness()
         self._room_availability()
         self._lecture_count()
+        self._lab_no_early_periods()    # Phase 3: hard P1/P2 block for labs
         self._lab_two_hour_blocks()
-        self._first_slot_priority()
         self._thursday_club_rule()
+        self._first_slot_priority()
 
     # ── 1. Teacher Uniqueness ─────────────────────────────────────────────────
     def _teacher_uniqueness(self) -> None:
-        """A teacher cannot appear in more than one slot simultaneously."""
+        """A teacher cannot appear in more than one slot at the same time."""
         for day in DAYS:
             for period in PERIODS:
                 for teacher in self.teachers:
                     slots = [
                         self.x[k]
                         for k in self.x
-                        if k[0] == teacher and k[4] == day and k[5] == period
+                        if k[0] == teacher and k[5] == day and k[6] == period
                     ]
                     if slots:
                         self.model.add_at_most_one(slots)
 
     # ── 2. Room Availability ──────────────────────────────────────────────────
     def _room_availability(self) -> None:
-        """No two classes may be scheduled in the same room at the same time."""
+        """No two classes may be in the same room at the same time."""
         for day in DAYS:
             for period in PERIODS:
                 for room in self.rooms:
                     slots = [
                         self.x[k]
                         for k in self.x
-                        if k[6] == room and k[4] == day and k[5] == period
+                        if k[7] == room and k[5] == day and k[6] == period
                     ]
                     if slots:
                         self.model.add_at_most_one(slots)
 
-    # ── 3. Lecture Count ──────────────────────────────────────────────────────
+    # ── 3. Lecture Count (weekly load) ────────────────────────────────────────
     def _lecture_count(self) -> None:
         """Each assignment must have exactly lectures_per_week slots assigned."""
         for asgn in self.assignments:
-            teacher = asgn["teacher_name"]
-            subject = asgn["subject_name"]
-            branch  = asgn["branch"]
-            year    = asgn["year"]
+            teacher  = asgn["teacher_name"]
+            subject  = asgn["subject_name"]
+            branch   = asgn["branch"]
+            year     = asgn["year"]
+            section  = asgn.get("section", "A")
             required = asgn["lectures_per_week"]
 
             slots = [
@@ -101,52 +109,62 @@ class ConstraintBuilder:
                 for k in self.x
                 if k[0] == teacher and k[1] == subject
                 and k[2] == branch and k[3] == year
+                and k[4] == section
             ]
             if slots:
                 self.model.add(sum(slots) == required)
 
-    # ── 4. Lab 2-Hour Blocks ─────────────────────────────────────────────────
+    # ── 4. HARD: Labs NOT in P1 or P2 ────────────────────────────────────────
+    def _lab_no_early_periods(self) -> None:
+        """
+        Phase 3 — Hard constraint: lab subjects cannot be placed in P1 or P2.
+        Sets every decision variable for a lab subject at period 1 or 2 to 0.
+        """
+        for k, var in self.x.items():
+            if k[1] in self.lab_subjects and k[6] in (1, 2):
+                self.model.add(var == 0)
+
+    # ── 5. Lab 2-Hour Consecutive Blocks ─────────────────────────────────────
     def _lab_two_hour_blocks(self) -> None:
         """Lab subjects occupy exactly two consecutive periods."""
         for subject in self.lab_subjects:
             for day in DAYS:
                 for p in PERIODS[:-1]:   # need p and p+1
                     for k in self.x:
-                        if k[1] == subject and k[4] == day and k[5] == p:
-                            # If this slot is used, the next must also be used
-                            k_next = (k[0], k[1], k[2], k[3], day, p + 1, k[6])
+                        if k[1] == subject and k[5] == day and k[6] == p:
+                            # If slot at period p is used, p+1 must also be used
+                            k_next = (k[0], k[1], k[2], k[3], k[4], day, p + 1, k[7])
                             if k_next in self.x:
                                 self.model.add(self.x[k_next] == self.x[k])
 
-    # ── 5. First Slot Priority ────────────────────────────────────────────────
+    # ── 6. Thursday Club Rule ─────────────────────────────────────────────────
+    def _thursday_club_rule(self) -> None:
+        """
+        Thursday P1 and P7 are reserved for Club Activity.
+        No academic classes allowed in these two slots.
+        Guide §7: 'Thursday P1 & P7 always show Club Activity'
+        """
+        club_periods = {PERIODS[0], PERIODS[-1]}   # periods 1 and 7
+        for k, var in self.x.items():
+            if k[5] == "Thursday" and k[6] in club_periods:
+                self.model.add(var == 0)
+
+    # ── 7. First Slot Priority (soft → hard) ─────────────────────────────────
     def _first_slot_priority(self) -> None:
         """
-        Encourage lecture-type subjects to be placed in early periods (1–2).
-        Implemented as a soft preference by adding a bonus to objective later.
-        Here we enforce: no free period 1 for a branch/year that has lectures.
+        Encourage at least one class in P1 each day for each branch/year/section.
         """
-        # Hard rule: at least one class must be scheduled in period 1 each day
-        # for each branch/year combination that has assignments.
-        by = set((a["branch"], a["year"]) for a in self.assignments)
+        bys = set(
+            (a["branch"], a["year"], a.get("section", "A"))
+            for a in self.assignments
+        )
         for day in DAYS:
-            for branch, year in by:
+            for branch, year, section in bys:
                 slots_p1 = [
                     self.x[k]
                     for k in self.x
-                    if k[2] == branch and k[3] == year
-                    and k[4] == day and k[5] == 1
+                    if k[2] == branch and k[3] == year and k[4] == section
+                    and k[5] == day and k[6] == 1
                 ]
                 if slots_p1:
                     self.model.add(sum(slots_p1) >= 1)
-
-    # ── 6. Thursday Club Rule ─────────────────────────────────────────────────
-    def _thursday_club_rule(self) -> None:
-        """Last period on Thursday is reserved for club activity — no classes."""
-        last_period = PERIODS[-1]
-        thursday_slots = [
-            self.x[k]
-            for k in self.x
-            if k[4] == "Thursday" and k[5] == last_period
-        ]
-        for var in thursday_slots:
-            self.model.add(var == 0)

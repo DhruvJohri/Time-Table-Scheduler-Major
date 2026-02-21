@@ -3,13 +3,12 @@ Export Routes — PDF only
 GET /api/export/{timetable_id}/pdf  🔒 (auth required)
 """
 
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from bson.objectid import ObjectId
 from io import BytesIO
 from datetime import datetime
 from app.models.database import timetables_collection
-from app.dependencies import get_current_admin
 import os
 
 # ── PDF export ─────────────────────────────────────────────────────────────────
@@ -48,7 +47,6 @@ COL_DEFS = [
 @router.get("/{timetable_id}/pdf")
 async def export_pdf(
     timetable_id: str,
-    _admin=Depends(get_current_admin),
 ):
     """Export timetable as landscape A4 PDF. Requires: Authorization: Bearer <token>"""
     try:

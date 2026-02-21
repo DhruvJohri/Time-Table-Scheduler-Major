@@ -1,100 +1,100 @@
 /**
- * api.js — Centralised Axios API layer for the College Timetable Generator.
- * Base URL: VITE_API_URL env var (default http://localhost:8000)
- *
- * Auth:
- *   - Token is stored in module-level memory (not localStorage) for security.
- *   - All mutating requests automatically send: Authorization: Bearer <token>
+ * api.js — All API calls for the College Timetable Generator
+ * Guide-compliant routes (no /api prefix on timetable routes, no plural)
  */
 
 import axios from "axios";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
-// ── In-memory token storage ────────────────────────────────────────────────────
-let _token = null;
-
-export const setToken  = (t) => { _token = t; };
-export const clearToken = () => { _token = null; };
-export const getToken  = () => _token;
-
-// ── Axios instance ─────────────────────────────────────────────────────────────
 const api = axios.create({
     baseURL: BASE_URL,
-    timeout: 60000,   // 60s — solver can take time
+    timeout: 120000, // 2 minutes for generation
     headers: { "Content-Type": "application/json" },
 });
 
-// Attach Bearer token on every request if available
-api.interceptors.request.use((config) => {
-    if (_token) {
-        config.headers["Authorization"] = `Bearer ${_token}`;
-    }
-    return config;
-});
+// ── Admin Profiles ────────────────────────────────────────────────────────────
+export const saveProfile = (payload) =>
+    api.post("/api/profiles", payload);
 
-// ── Auth ───────────────────────────────────────────────────────────────────────
-export const loginAdmin = (email, password) =>
-    api.post("/api/auth/login", { email, password });
+export const loginProfile = (payload) =>
+    api.post("/api/auth/login", payload);
 
-// ── Admin Profile ──────────────────────────────────────────────────────────────
-export const registerAdmin = (data) =>
-    api.post("/api/profiles", data);
+// ── Upload ────────────────────────────────────────────────────────────────────
+export const uploadMasterData = (formData, adminEmail) =>
+    api.post(`/api/upload/master?admin_email=${encodeURIComponent(adminEmail)}`, formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+    });
 
-export const getAdmin = (email) =>
-    api.get(`/api/profiles/${encodeURIComponent(email)}`);
+export const uploadAssignmentData = (formData, adminEmail) =>
+    api.post(`/api/upload/assignment?admin_email=${encodeURIComponent(adminEmail)}`, formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+    });
 
-// ── Upload: Master Data ────────────────────────────────────────────────────────
-export const uploadMasterData = (file, adminEmail) => {
-    const fd = new FormData();
-    fd.append("file", file);
-    return api.post(
-        `/api/upload/master?admin_email=${encodeURIComponent(adminEmail)}`,
-        fd,
-        { headers: { "Content-Type": "multipart/form-data" } }
-    );
-};
+// ── Timetable — Guide §4 Routes ───────────────────────────────────────────────
 
-// ── Upload: Assignment Data ────────────────────────────────────────────────────
-export const uploadAssignmentData = (file, adminEmail) => {
-    const fd = new FormData();
-    fd.append("file", file);
-    return api.post(
-        `/api/upload/assignment?admin_email=${encodeURIComponent(adminEmail)}`,
-        fd,
-        { headers: { "Content-Type": "multipart/form-data" } }
-    );
-};
-
-// ── Timetable Generation ───────────────────────────────────────────────────────
+/**
+ * POST /timetable/generate
+ * Returns: { status: "success"|"partial", message?: "...", unallocated?: [...] }
+ * Does NOT return timetable data — call getTimetableBySection after.
+ */
 export const generateTimetable = (payload) =>
-    api.post("/api/timetables/generate", payload);
+    api.post("/timetable/generate", payload);
 
-// ── Timetable Fetch ────────────────────────────────────────────────────────────
-export const getTimetable = (id) =>
-    api.get(`/api/timetables/${id}`);
+/**
+ * GET /timetable
+ * Returns flat array of ALL timetable slot entries.
+ */
+export const getAllTimetable = () =>
+    api.get("/timetable");
 
-export const getTimetableVersions = (userId, branch, year) => {
-    const params = new URLSearchParams();
-    if (branch) params.append("branch", branch);
-    if (year)   params.append("year",   year);
-    return api.get(`/api/timetables/user/${userId}/versions?${params.toString()}`);
-};
+/**
+ * GET /timetable/{branch}/{year}/{section}
+ * Returns flat array of slots for the most recent matching timetable.
+ */
+export const getTimetableBySection = (branch, year, section) =>
+    api.get(
+        `/timetable/${encodeURIComponent(branch)}/${encodeURIComponent(year)}/${encodeURIComponent(section)}`
+    );
 
-export const deleteTimetable = (id) =>
-    api.delete(`/api/timetables/${id}`);
+/**
+ * DELETE /timetable/clear
+ * Deletes ALL timetables.
+ */
+export const clearAllTimetables = () =>
+    api.delete("/timetable/clear");
 
-// ── Export — PDF only ──────────────────────────────────────────────────────────
+// ── Version History (History Panel) ──────────────────────────────────────────
+export const getTimetableVersions = (adminId) =>
+    api.get(`/timetable/versions/${adminId}`);
+
+export const getTimetableById = (timetableId) =>
+    api.get(`/timetable/id/${timetableId}`);
+
+export const deleteTimetableById = (timetableId) =>
+    api.delete(`/timetable/id/${timetableId}`);
+
+// ── Export ────────────────────────────────────────────────────────────────────
+export const exportTimetable = (adminId, format = "pdf") =>
+    api.post(`/api/export/${adminId}`, { format }, {
+        responseType: format === "json" ? "json" : "blob",
+    });
+
+/**
+ * downloadPDF(timetableId) — used by ExportPanel to trigger PDF download.
+ */
 export const downloadPDF = async (timetableId) => {
-    const res = await api.get(`/api/export/${timetableId}/pdf`, {
+    const response = await api.get(`/api/export/${timetableId}/pdf`, {
         responseType: "blob",
     });
-    const url  = URL.createObjectURL(res.data);
+    const url = window.URL.createObjectURL(new Blob([response.data]));
     const link = document.createElement("a");
-    link.href     = url;
-    link.download = `timetable_${timetableId}.pdf`;
+    link.href = url;
+    link.setAttribute("download", `timetable_${timetableId}.pdf`);
+    document.body.appendChild(link);
     link.click();
-    URL.revokeObjectURL(url);
+    link.remove();
+    window.URL.revokeObjectURL(url);
 };
 
 export default api;

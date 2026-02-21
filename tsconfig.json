@@ -4,7 +4,7 @@
     "module": "commonjs",
     "lib": ["ES2020"],
     "outDir": "./dist",
-    "rootDir": "./src",
+    "rootDir": "./Frontend/src",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -15,9 +15,11 @@
     "sourceMap": true,
     "moduleResolution": "node",
     "allowSyntheticDefaultImports": true,
+    "allowJs": true,
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "include": ["Frontend/src/**/*"],
+  "exclude": ["node_modules", "dist", "Frontend/node_modules"]
 }
+

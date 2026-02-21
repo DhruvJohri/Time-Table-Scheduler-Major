@@ -1,23 +1,24 @@
 """
 Assignment Data Upload Route
 POST /api/upload/assignment
-Columns required: TeacherName | SubjectName | Year | Branch | LecturesPerWeek
+Required columns: TeacherName | SubjectName | Year | Branch | LecturesPerWeek
+Optional column : Section (defaults to "A" if absent)
 Admin is identified by the admin_email query param passed by the frontend.
 """
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Query, status, Depends
+from fastapi import APIRouter, HTTPException, UploadFile, File, Query, status
 from io import BytesIO
 from datetime import datetime
 from typing import Optional
 import pandas as pd
 
 from app.models.database import users_collection, assignment_data_collection
-from app.dependencies import get_current_admin
+
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 
 REQUIRED_COLUMNS = {"TeacherName", "SubjectName", "Year", "Branch", "LecturesPerWeek"}
-ALLOWED_EXTS = (".xlsx", ".xls")
+ALLOWED_EXTS     = (".xlsx", ".xls")
 
 
 def _validate_columns(df: pd.DataFrame):
@@ -63,12 +64,11 @@ def _find_admin(email: str):
 async def upload_assignment_data(
     file: UploadFile = File(...),
     admin_email: Optional[str] = Query(None, description="Admin email (required)"),
-    _admin=Depends(get_current_admin),
 ):
     """
     Upload Assignment Data Excel file.
     Required columns: TeacherName, SubjectName, Year, Branch, LecturesPerWeek
-    Admin is identified via the admin_email query parameter.
+    Optional column : Section (defaults to "A" if not present in file)
     """
     if not admin_email:
         raise HTTPException(
@@ -100,13 +100,22 @@ async def upload_assignment_data(
     # Resolve admin from query param
     resolved_id, resolved_email = _find_admin(admin_email)
 
+    # Check if Section column is present (optional — defaults to "A")
+    has_section_col = "Section" in df.columns
+
     assignments = []
     for _, row in df.iterrows():
+        section = "A"
+        if has_section_col:
+            raw_sec = str(row.get("Section", "")).strip()
+            section = raw_sec if raw_sec and raw_sec.lower() != "nan" else "A"
+
         assignments.append({
             "teacher_name":      str(row["TeacherName"]).strip(),
             "subject_name":      str(row["SubjectName"]).strip(),
             "year":              str(row["Year"]).strip(),
             "branch":            str(row["Branch"]).strip(),
+            "section":           section,
             "lectures_per_week": int(row["LecturesPerWeek"]),
         })
 

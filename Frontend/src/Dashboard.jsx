@@ -1,101 +1,52 @@
-import { useCallback, useState } from "react";
-import useTimetable from "./hooks/useTimetable";
+/**
+ * Dashboard — College Timetable Generator
+ *
+ * Guide §5 workflow:
+ *   1. Save Profile
+ *   2. Upload Master Data Excel
+ *   3. Upload Assignment Data Excel
+ *   4. Click Generate → POST /timetable/generate → GET /timetable/{branch}/{year}/{section}
+ *   5. Grid renders automatically
+ *
+ * Guide §10: Partial banner shown when status === "partial"
+ * Guide §9:  Reset button → DELETE /timetable/clear
+ */
+
+import { useCallback } from "react";
+import { useTimetable } from "./hooks/useTimetable";
 import UploadPanel from "./components/UploadPanel";
 import TimetableGrid from "./components/TimetableGrid";
 import HistoryPanel from "./components/HistoryPanel";
 import ExportPanel from "./components/ExportPanel";
 import { useToast } from "./context/ToastContext";
 
-// ── Add / Switch Profile Modal ─────────────────────────────────────────────────
-const ROLES = ["Admin", "Coordinator", "HOD", "Principal"];
-
-function AddProfileModal({ onSave, onClose, loading }) {
-    const [form, setForm] = useState({
-        name: "", email: "", college_name: "", role: "Admin", password: "",
-    });
-    const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
-
-    return (
-        <div className="modal-overlay" onClick={onClose}>
-            <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-                <div className="modal-title">➕ Add / Switch Profile</div>
-                <div className="form-row">
-                    <label>Name <input value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="Full name" required /></label>
-                    <label>Email <input type="email" value={form.email} onChange={(e) => set("email", e.target.value)} placeholder="admin@college.edu" required /></label>
-                </div>
-                <div className="form-row">
-                    <label>College <input value={form.college_name} onChange={(e) => set("college_name", e.target.value)} placeholder="College name" required /></label>
-                    <label>Role
-                        <select value={form.role} onChange={(e) => set("role", e.target.value)}>
-                            {ROLES.map((r) => <option key={r}>{r}</option>)}
-                        </select>
-                    </label>
-                </div>
-                <div className="form-row">
-                    <label style={{ width: "100%" }}>Password
-                        <input
-                            type="password" value={form.password}
-                            onChange={(e) => set("password", e.target.value)}
-                            placeholder="Choose a secure password" required
-                            style={{ width: "100%" }}
-                        />
-                    </label>
-                </div>
-                <div className="modal-actions">
-                    <button className="btn-outline" onClick={onClose}>Cancel</button>
-                    <button className="btn-primary" onClick={() => onSave(form)} disabled={loading}>
-                        {loading ? "Saving…" : "Save Profile"}
-                    </button>
-                </div>
-            </div>
-        </div>
-    );
-}
-
-// ── Dashboard ──────────────────────────────────────────────────────────────────
 function Dashboard() {
     const { showToast } = useToast();
     const {
-        admin, timetable, versions, loading, error,
-        login, registerAdmin,
-        uploadMaster, uploadAssignment,
-        generateTimetable,
-        fetchVersions, loadVersion, deleteVersion,
-        logoutAdmin,
+        admin,
+        timetable,
+        history,
+        loading,
+        error,
+        partial,
+        handleSaveAdmin,
+        handleUploadAndGenerate,
+        loadFromHistory,
+        deleteHistoryEntry,
+        clearAllVersions,
         clearError,
+        clearPartial,
     } = useTimetable();
 
-    const [showAddProfile, setShowAddProfile] = useState(false);
-
-    // ── Register (create) admin profile → auto-login ──────────────────────────
-    const handleRegisterAdmin = useCallback(async (formData) => {
+    // ── Reset — DELETE /timetable/clear ───────────────────────────────────────
+    const handleResetTimetable = useCallback(async () => {
         try {
-            const created = await registerAdmin(formData);
-            setShowAddProfile(false);
-            showToast("Profile saved — you are now logged in.", "success");
-            return created;
+            await clearAllVersions();
+            showToast("All timetables cleared.", "info");
         } catch (err) {
             showToast(err.message, "error");
-            throw err;
         }
-    }, [registerAdmin, showToast]);
-
-    // ── Combined upload + generate ────────────────────────────────────────────
-    const handleUploadAndGenerate = useCallback(async ({ masterFile, assignmentFile, branch, year }) => {
-        const currentAdmin = admin;
-        if (!currentAdmin) throw new Error("Admin profile not set.");
-
-        const masterResult = await uploadMaster(masterFile, currentAdmin.email);
-        const assignResult = await uploadAssignment(assignmentFile, currentAdmin.email);
-
-        await generateTimetable({
-            admin_id: currentAdmin.id || currentAdmin._id,
-            branch: branch || undefined,
-            year: year || undefined,
-        });
-
-        return { masterResult, assignResult };
-    }, [admin, uploadMaster, uploadAssignment, generateTimetable]);
+    }, [clearAllVersions, showToast]);
 
     return (
         <div className="dashboard">
@@ -117,12 +68,14 @@ function Dashboard() {
                             </div>
                         </div>
                     )}
-                    <button className="btn-add-profile" onClick={() => setShowAddProfile(true)}>
-                        ➕ {admin ? "Switch Profile" : "Add Profile"}
-                    </button>
-                    {admin && (
-                        <button className="btn-outline small" onClick={logoutAdmin} title="Sign out / clear profile">
-                            Sign out
+                    {timetable && (
+                        <button
+                            className="btn-outline small"
+                            onClick={handleResetTimetable}
+                            disabled={loading}
+                            title="Delete ALL timetables and reset (guide §9)"
+                        >
+                            🔄 Reset Timetable
                         </button>
                     )}
                 </div>
@@ -140,18 +93,15 @@ function Dashboard() {
                 <aside className="sidebar">
                     <UploadPanel
                         admin={admin}
-                        onRegisterAdmin={handleRegisterAdmin}
-                        onLogin={login}
+                        onSaveAdmin={handleSaveAdmin}
                         onUploadAndGenerate={handleUploadAndGenerate}
                         loading={loading}
                     />
                     <HistoryPanel
-                        admin={admin}
-                        versions={versions}
+                        history={history}
                         loading={loading}
-                        onFetchVersions={fetchVersions}
-                        onLoadVersion={loadVersion}
-                        onDeleteVersion={deleteVersion}
+                        onLoadEntry={loadFromHistory}
+                        onDeleteEntry={deleteHistoryEntry}
                     />
                     <ExportPanel timetable={timetable} />
                 </aside>
@@ -160,31 +110,46 @@ function Dashboard() {
                     {loading && !timetable && (
                         <div className="loading-state">
                             <div className="loading-spinner" />
-                            <p>Running OR-Tools CP-SAT solver…</p>
+                            <div>
+                                <p>Running OR-Tools CP-SAT solver…</p>
+                                <p className="loading-sub">This may take up to 30 seconds</p>
+                            </div>
                         </div>
                     )}
                     {!loading && !timetable && (
                         <div className="empty-state">
                             <div className="empty-icon">📅</div>
                             <h2>No timetable generated yet</h2>
-                            <p>
-                                Upload your Excel files in the sidebar and click<br />
-                                <strong>Generate Timetable</strong> to begin.
-                            </p>
+                            <p>Follow the steps in the sidebar to get started.</p>
+                            <div className="empty-steps">
+                                <div className="empty-step">
+                                    <span className="empty-step-num">1</span>
+                                    <span>Save your admin profile</span>
+                                </div>
+                                <div className="empty-step">
+                                    <span className="empty-step-num">2</span>
+                                    <span>Upload Master Data Excel</span>
+                                </div>
+                                <div className="empty-step">
+                                    <span className="empty-step-num">3</span>
+                                    <span>Upload Assignment Data Excel</span>
+                                </div>
+                                <div className="empty-step">
+                                    <span className="empty-step-num">4</span>
+                                    <span>Choose Branch / Year / Section → Generate</span>
+                                </div>
+                            </div>
                         </div>
                     )}
-                    {timetable && <TimetableGrid timetable={timetable} />}
+                    {timetable && (
+                        <TimetableGrid
+                            timetable={timetable}
+                            partial={partial}
+                            onClearPartial={clearPartial}
+                        />
+                    )}
                 </main>
             </div>
-
-            {/* ── Add Profile modal ── */}
-            {showAddProfile && (
-                <AddProfileModal
-                    onSave={handleRegisterAdmin}
-                    onClose={() => setShowAddProfile(false)}
-                    loading={loading}
-                />
-            )}
         </div>
     );
 }

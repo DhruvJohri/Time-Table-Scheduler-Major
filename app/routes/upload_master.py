@@ -5,14 +5,14 @@ Columns required: TeacherName | SubjectName | Year | Branch | Classroom
 Each row represents: teacher X teaches subject Y to branch Z / year W in room R.
 """
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Query, status, Depends
+from fastapi import APIRouter, HTTPException, UploadFile, File, Query, status
 from io import BytesIO
 from datetime import datetime
 from typing import Optional
 import pandas as pd
 
 from app.models.database import users_collection, master_data_collection
-from app.dependencies import get_current_admin
+
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 
@@ -43,7 +43,6 @@ def _validate_row(row: pd.Series, idx: int):
 async def upload_master_data(
     file: UploadFile = File(...),
     admin_email: Optional[str] = Query(None, description="Admin email"),
-    _admin=Depends(get_current_admin),
 ):
     """
     Upload Master Data Excel file.

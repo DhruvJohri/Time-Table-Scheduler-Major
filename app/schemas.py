@@ -1,5 +1,6 @@
 """
 College Timetable System — Pydantic Schemas
+Guide-compliant field definitions.
 """
 
 from pydantic import BaseModel, EmailStr, field_validator
@@ -59,6 +60,7 @@ class AssignmentEntry(BaseModel):
     subject_name: str
     year: str                      # "1" | "2" | "3" | "4"
     branch: str                    # "CS" | "EC" | "ME" | ...
+    section: str = "A"             # "A" | "B" | "C" (guide §4 required field)
     lectures_per_week: int
 
 
@@ -69,29 +71,30 @@ class AssignmentUploadResponse(BaseModel):
     assignments_preview: List[Dict[str, Any]]
 
 
-# ── Timetable Slot ────────────────────────────────────────────────────────────
+# ── Guide §4 Timetable Slot ───────────────────────────────────────────────────
 
 class TimetableSlot(BaseModel):
-    """A single period in the generated timetable."""
-    day: str                       # Monday … Saturday
-    period: int                    # 1-based slot index
-    start_time: str                # HH:MM
-    end_time: str                  # HH:MM
-    subject: str
-    teacher: str
-    room: str
+    """
+    A single period in the generated timetable — exact guide §4 fields only.
+    """
+    day: str         # "Monday" … "Saturday"
+    period: int      # 1-based, 1–7
     branch: str
-    year: str
-    is_lab: bool = False
-    is_free: bool = False
+    year: int        # integer (guide requirement)
+    section: str     # "A" | "B" | "C"
+    subject: str
+    faculty: str
+    room: str
+    type: str        # "LECTURE" | "LAB" | "TUTORIAL" | "SEMINAR" | "CLUB"
 
 
 # ── Generate Request / Response ───────────────────────────────────────────────
 
 class GenerateTimetableRequest(BaseModel):
     admin_id: str
-    branch: Optional[str] = None   # if None → generate for all branches
-    year: Optional[str] = None     # if None → generate for all years
+    branch: Optional[str] = None    # if None → generate for all branches
+    year: Optional[str] = None      # if None → generate for all years
+    section: Optional[str] = None   # if None → generate for all sections
     start_date: Optional[str] = None
 
 
