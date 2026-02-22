@@ -1,332 +1,393 @@
 """
-Timetable Routes — Guide-Compliant
-POST   /timetable/generate
-GET    /timetable
-GET    /timetable/{branch}/{year}/{section}
-DELETE /timetable/clear
+Timetable generation and management API.
+Frozen spec compliant (6 days × 7 periods, deterministic grid).
 """
 
-from fastapi import APIRouter, HTTPException, status
-from bson.objectid import ObjectId
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
 from datetime import datetime
-from typing import List, Optional
-import re
+from typing import Dict, List
 
-from app.schemas import GenerateTimetableRequest
-from app.models.database import (
-    users_collection,
-    timetables_collection,
-    master_data_collection,
-    assignment_data_collection,
+from app.models.database import get_db
+from app.models.models import (
+    TimetableEntry,
+    Subject,
+    Faculty,
+    Classroom,
+    LabRoom,
+    Branch,
+    YearSection,
+    ScheduleMetadata,
+    DayOfWeek,
+    SessionType,
 )
-from app.services.college_scheduler import get_college_scheduler
+from app.schemas.schemas import (
+    GenerateScheduleRequest,
+    ScheduleGenerationResponse,
+    ValidationReport,
+    ConflictReport,
+    ScheduleStatistics,
+)
+from app.services.scheduling_engine import SchedulerEngine
+from app.services.validators import ConstraintValidator
 
+router = APIRouter(prefix="/api/timetable", tags=["timetable"])
 
-router = APIRouter(prefix="/timetable", tags=["timetable"])
-
-
-# ── Helper: normalise year strings ───────────────────────────────────────────
-def _norm_year(year_str: str) -> str:
+# =========================================================
+# GENERATE TIMETABLE
+# =========================================================
+@router.post("/generate", response_model=ScheduleGenerationResponse)
+async def generate_timetable(
+    request: GenerateScheduleRequest,
+    db: Session = Depends(get_db),
+):
     """
-    Extract numeric part from any year string.
-    "3rd Year" → "3",  "Year 3" → "3",  "3" → "3"
+    Generate timetable (always fresh).
+    Frozen rules:
+    - 6 days
+    - 7 periods
+    - clean regenerate
     """
-    if not year_str:
-        return str(year_str)
-    m = re.search(r'(\d+)', str(year_str))
-    return m.group(1) if m else str(year_str).strip()
-
-
-# ── Helper: serialise Mongo doc ──────────────────────────────────────────────
-def _ser(doc: dict) -> dict:
-    """Convert MongoDB document to JSON-serializable dict."""
-    out = {}
-    for k, v in doc.items():
-        if k == "_id":
-            out["id"] = str(v)
-        elif isinstance(v, ObjectId):
-            out[k] = str(v)
-        elif isinstance(v, datetime):
-            out[k] = v.isoformat()
-        elif isinstance(v, dict):
-            out[k] = _ser(v)
-        elif isinstance(v, list):
-            out[k] = [_ser(i) if isinstance(i, dict) else i for i in v]
-        else:
-            out[k] = v
-    return out
-
-
-# ── POST /timetable/generate ─────────────────────────────────────────────────
-@router.post("/generate", status_code=status.HTTP_201_CREATED)
-async def generate_timetable(request: GenerateTimetableRequest):
-    """
-    Generate a college timetable using OR-Tools CP-SAT.
-    Returns only { status, message | unallocated } — no timetable payload.
-    Frontend must call GET /timetable/{branch}/{year}/{section} to retrieve data.
-    """
-    # 1. Resolve admin
     try:
-        admin = users_collection.find_one({"_id": ObjectId(request.admin_id)})
-    except Exception:
-        raise HTTPException(status_code=404, detail="Invalid admin_id format.")
-    if not admin:
-        raise HTTPException(status_code=404, detail="Admin profile not found.")
+        scheduler = SchedulerEngine(db, seed=request.seed)
 
-    admin_email = admin["email"]
+        # ALWAYS clear existing timetable
+        db.query(TimetableEntry).delete()
+        db.commit()
 
-    # 2. Load latest master data
-    master = master_data_collection.find_one(
-        {"admin_email": admin_email},
-        sort=[("created_at", -1)]
-    )
-    if not master:
-        raise HTTPException(
-            status_code=400,
-            detail="No master data found. Upload Master Data Excel first."
+        # Run scheduler
+        success, report = scheduler.schedule_all()
+
+        # Clubs optional
+        if request.include_clubs:
+            scheduler.schedule_clubs()
+
+        # Final conflict validation
+        validator = ConstraintValidator(db)
+        is_valid, conflicts = validator.validate_full_schedule()
+
+        # Compute final success
+        success = success and is_valid
+
+        # Save metadata
+        metadata = ScheduleMetadata(
+            generated_at=datetime.utcnow(),
+            generation_seed=request.seed,
+            generation_time_ms=report.get("generation_time_ms", 0),
+            is_valid=success,
+            conflict_count=len(conflicts),
+            unallocated_subjects_count=report.get("unallocated_count", 0),
+            capacity=report.get("capacity"),
+            demand=report.get("demand"),
+            expected_empty=report.get("expected_empty"),
+        )
+        db.add(metadata)
+        db.commit()
+
+        return ScheduleGenerationResponse(
+            success=success,
+            message=report.get("message", "Timetable generated"),
+            generation_time_ms=report.get("generation_time_ms"),
+            conflict_count=len(conflicts),
+            unallocated_subjects=report.get("unallocated_count", 0),
+            failed_subjects=report.get("failed_subjects", []),
+            capacity=report.get("capacity"),
+            demand=report.get("demand"),
+            expected_empty=report.get("expected_empty"),
         )
 
-    # 3. Load latest assignment data
-    asgn_doc = assignment_data_collection.find_one(
-        {"admin_email": admin_email},
-        sort=[("created_at", -1)]
-    )
-    if not asgn_doc:
-        raise HTTPException(
-            status_code=400,
-            detail="No assignment data found. Upload Assignment Data Excel first."
-        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    assignments = asgn_doc.get("assignments", [])
 
-    # Apply filters
-    if request.branch:
-        assignments = [a for a in assignments if a["branch"] == request.branch]
-    if request.year:
-        req_year_norm = _norm_year(request.year)
-        assignments = [a for a in assignments if _norm_year(a["year"]) == req_year_norm]
-    if request.section:
-        assignments = [a for a in assignments if a.get("section", "A") == request.section]
-
-    if not assignments:
-        raise HTTPException(
-            status_code=400,
-            detail="No assignments match the selected Branch/Year/Section filter."
-        )
-
-    # 4. Extract master lists
-    teachers   = master.get("teachers", [])
-    subjects   = master.get("subjects", [])
-    classrooms = master.get("classrooms", [])
-
-    records = master.get("records", [])
-    if not teachers:
-        teachers = sorted({r["teacher_name"] for r in records})
-    if not teachers:
-        teachers = sorted({a["teacher_name"] for a in assignments})
-    if not subjects:
-        subjects = sorted({r["subject_name"] for r in records})
-    if not subjects:
-        subjects = sorted({a["subject_name"] for a in assignments})
-    if not classrooms:
-        classrooms = sorted({r["classroom"] for r in records if r.get("classroom")})
-    if not classrooms:
-        classrooms = ["R101"]
-
-    rooms        = [{"room_name": c, "room_type": "lecture"} for c in classrooms]
-    lab_subjects = [s for s in subjects if "lab" in s.lower()]
-
-    # 5. Run solver
+# =========================================================
+# FULL TIMETABLE
+# =========================================================
+@router.get("")
+async def get_full_timetable(db: Session = Depends(get_db)):
+    """
+    Return all timetable entries grouped by day.
+    """
     try:
-        scheduler = get_college_scheduler()
-        solver_result = scheduler.allocate(
-            assignments=assignments,
-            teachers=teachers,
-            subjects=subjects,
-            rooms=rooms,
-            lab_subjects=lab_subjects,
-            branch_filter=request.branch,
-            year_filter=request.year,
-            section_filter=request.section,
+        entries = db.query(TimetableEntry).all()
+
+        if not entries:
+            return {"total_entries": 0, "days": {}}
+
+        timetable: Dict[str, List] = {}
+
+        for e in entries:
+            day = e.day_of_week.value
+            timetable.setdefault(day, []).append(
+                {
+                    "period": e.period_number,
+                    "branch": e.branch.code if e.branch else None,
+                    "year_section": f"{e.year_section.year}{e.year_section.section}"
+                    if e.year_section
+                    else None,
+                    "subject": e.subject.code if e.subject else None,
+                    "faculty": e.faculty.name if e.faculty else None,
+                    "classroom": e.classroom.room_number if e.classroom else None,
+                    "labroom": e.labroom.room_number if e.labroom else None,
+                    "type": e.session_type.value,
+                }
+            )
+
+        return {
+            "total_entries": len(entries),
+            "days": timetable,
+            "generated_at": entries[0].created_at,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =========================================================
+# BRANCH TIMETABLE
+# =========================================================
+def _get_branch_section(db: Session, branch_code: str, year: int, section: str):
+    branch = db.query(Branch).filter(Branch.code == branch_code).first()
+    if not branch:
+        raise HTTPException(404, f"Branch {branch_code} not found")
+
+    ys = (
+        db.query(YearSection)
+        .filter(
+            YearSection.branch_id == branch.id,
+            YearSection.year == year,
+            YearSection.section == section,
         )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Solver error: {exc}")
-
-    flat_timetable = solver_result.get("timetable", [])
-    unallocated    = solver_result.get("unallocated", [])
-    sched_status   = "partial" if unallocated else "success"
-
-    # 6. Versioning labels
-    branches = sorted({a["branch"]              for a in assignments})
-    years    = sorted({_norm_year(a["year"])     for a in assignments})
-    secs     = sorted({a.get("section", "A")    for a in assignments})
-
-    branch_label  = request.branch  or ",".join(branches)
-    year_label    = _norm_year(request.year) if request.year else ",".join(years)
-    section_label = request.section or ",".join(secs)
-
-    existing = timetables_collection.count_documents({
-        "admin_id": request.admin_id,
-        "branch":   branch_label,
-        "year":     year_label,
-        "section":  section_label,
-    })
-    version = existing + 1
-
-    start_date = request.start_date or datetime.utcnow().strftime("%Y-%m-%d")
-    label = (
-        f"v{version} — {branch_label} / "
-        f"Year {year_label} / Sec {section_label} — {start_date}"
+        .first()
     )
+    if not ys:
+        raise HTTPException(404, f"{branch_code} {year}{section} not found")
 
-    # 7. Store flat array in MongoDB
-    doc = {
-        "admin_id":   request.admin_id,
-        "branch":     branch_label,
-        "year":       year_label,
-        "section":    section_label,
-        "version":    version,
-        "label":      label,
-        "timetable":  flat_timetable,   # flat list of guide §4 slots
-        "created_at": datetime.utcnow(),
-    }
-    timetables_collection.insert_one(doc)
-
-    # 8. Return status + timetable slots directly (most reliable for frontend)
-    response = {
-        "status":    sched_status,
-        "timetable": flat_timetable,
-    }
-    if sched_status == "partial":
-        response["unallocated"] = unallocated
-    else:
-        response["message"] = "Timetable generated"
-    return response
+    return branch, ys
 
 
-# ── GET /timetable — flat array of ALL stored entries ────────────────────────
-@router.get("", response_model=list)
-async def get_all_timetables():
+@router.get("/{branch_code}/{year}/{section}")
+async def get_branch_timetable(
+    branch_code: str,
+    year: int,
+    section: str,
+    db: Session = Depends(get_db),
+):
     """
-    Return flat array of ALL timetable slot entries from all stored documents.
+    Branch/year/section timetable list.
     """
-    all_slots: List[dict] = []
-    cursor = timetables_collection.find({}, sort=[("created_at", -1)])
-    for doc in cursor:
-        slots = doc.get("timetable", [])
-        if isinstance(slots, list):
-            all_slots.extend(slots)
-    return all_slots
+    try:
+        branch, ys = _get_branch_section(db, branch_code, year, section)
 
+        entries = (
+            db.query(TimetableEntry)
+            .filter(
+                TimetableEntry.branch_id == branch.id,
+                TimetableEntry.year_section_id == ys.id,
+            )
+            .order_by(TimetableEntry.day_of_week, TimetableEntry.period_number)
+            .all()
+        )
 
-# ── GET /timetable/{branch}/{year}/{section} ──────────────────────────────────
-@router.get("/{branch}/{year}/{section}", response_model=list)
-async def get_timetable_by_section(branch: str, year: str, section: str):
-    """
-    Return flat array of slots for the MOST RECENT timetable matching
-    branch / year / section.
-    """
-    norm_yr = _norm_year(year)
+        result = [
+            {
+                "day": e.day_of_week.value,
+                "period": e.period_number,
+                "subject": e.subject.code if e.subject else None,
+                "subject_name": e.subject.name if e.subject else None,
+                "faculty": e.faculty.name if e.faculty else None,
+                "classroom": e.classroom.room_number if e.classroom else None,
+                "labroom": e.labroom.room_number if e.labroom else None,
+                "type": e.session_type.value,
+                "locked": e.is_locked,
+            }
+            for e in entries
+        ]
 
-    # Find most recent matching document
-    doc = timetables_collection.find_one(
-        {
-            "branch":  branch,
-            "year":    norm_yr,
+        return {
+            "branch": branch_code,
+            "year": year,
             "section": section,
-        },
-        sort=[("created_at", -1)]
-    )
+            "entries": result,
+            "total": len(result),
+        }
 
-    # Fallback: match without section (older docs may not have it)
-    if not doc:
-        doc = timetables_collection.find_one(
-            {"branch": branch, "year": norm_yr},
-            sort=[("created_at", -1)]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =========================================================
+# MATRIX GRID (STABLE UI)
+# =========================================================
+@router.get("/{branch_code}/{year}/{section}/matrix")
+async def get_branch_timetable_matrix(
+    branch_code: str,
+    year: int,
+    section: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Frozen grid: Mon–Sat × 7 periods.
+    Explicit empty slots included.
+    """
+    try:
+        branch, ys = _get_branch_section(db, branch_code, year, section)
+
+        days = [d.value for d in DayOfWeek]
+        periods = list(range(1, 8))
+
+        grid = {day: {p: None for p in periods} for day in days}
+
+        entries = db.query(TimetableEntry).filter(
+            TimetableEntry.branch_id == branch.id,
+            TimetableEntry.year_section_id == ys.id,
         )
 
-    if not doc:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No timetable found for {branch} / Year {year} / Section {section}."
+        for e in entries:
+            grid[e.day_of_week.value][e.period_number] = {
+                "subject_code": e.subject.code if e.subject else None,
+                "subject_name": e.subject.name if e.subject else None,
+                "faculty": e.faculty.name if e.faculty else None,
+                "type": e.session_type.value,
+                "classroom": e.classroom.room_number if e.classroom else None,
+                "labroom": e.labroom.room_number if e.labroom else None,
+                "locked": e.is_locked,
+            }
+
+        return {
+            "branch": branch_code,
+            "year": year,
+            "section": section,
+            "days": days,
+            "periods": periods,
+            "grid": grid,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =========================================================
+# CLEAR
+# =========================================================
+@router.delete("/clear")
+async def clear_timetable(db: Session = Depends(get_db)):
+    try:
+        count = db.query(TimetableEntry).delete()
+        db.commit()
+        return {"success": True, "cleared": count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =========================================================
+# VALIDATE
+# =========================================================
+@router.post("/validate", response_model=ValidationReport)
+async def validate_schedule(db: Session = Depends(get_db)):
+    """
+    Full constraint validation + required allocation counts.
+    """
+    try:
+        validator = ConstraintValidator(db)
+        is_valid, conflicts = validator.validate_full_schedule()
+
+        # required vs scheduled counts
+        required_map = validator.required_subject_counts()
+        scheduled_map = validator.scheduled_subject_counts()
+
+        unallocated = [
+            subj for subj, req in required_map.items()
+            if scheduled_map.get(subj, 0) < req
+        ]
+
+        formatted_conflicts = [
+            ConflictReport(
+                conflict_type="General",
+                day_of_week="",
+                period_number=0,
+                involved_subjects=[],
+                description=c,
+            )
+            for c in conflicts
+        ]
+
+        total = len(required_map)
+        allocated = total - len(unallocated)
+        percent = (allocated / total * 100) if total else 0
+
+        return ValidationReport(
+            is_valid=is_valid,
+            total_conflicts=len(conflicts),
+            conflicts=formatted_conflicts,
+            unallocated_subjects=unallocated,
+            allocation_percentage=percent,
         )
 
-    slots = doc.get("timetable", [])
-    if not isinstance(slots, list):
-        raise HTTPException(status_code=500, detail="Timetable data is malformed.")
-
-    # Filter flat list by section
-    filtered = [
-        s for s in slots
-        if str(s.get("section", "A")) == section
-    ]
-
-    # If nothing matched section filter, return all slots (older format)
-    if not filtered and slots:
-        filtered = slots
-
-    return filtered
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── DELETE /timetable/clear — delete ALL timetables ──────────────────────────
-@router.delete("/clear", status_code=status.HTTP_200_OK)
-async def clear_all_timetables():
+# =========================================================
+# STATISTICS
+# =========================================================
+@router.get("/statistics", response_model=ScheduleStatistics)
+async def get_schedule_statistics(db: Session = Depends(get_db)):
     """
-    Delete ALL stored timetables.
-    Guide §5: 'DELETE /timetable/clear — Frontend button: Reset Timetable'
+    Timetable resource utilization statistics.
     """
-    result = timetables_collection.delete_many({})
-    return {
-        "message": "All timetables cleared",
-        "deleted": result.deleted_count,
-    }
-
-
-# ── GET /timetable/id/{timetable_id} — fetch one by MongoDB _id (history) ────
-@router.get("/id/{timetable_id}", response_model=dict)
-async def get_timetable_by_id(timetable_id: str):
-    """Get a single complete timetable document by its MongoDB ID (for version history)."""
     try:
-        doc = timetables_collection.find_one({"_id": ObjectId(timetable_id)})
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid timetable ID.")
-    if not doc:
-        raise HTTPException(status_code=404, detail="Timetable not found.")
-    return _ser(doc)
+        total_entries = db.query(TimetableEntry).count()
 
+        def count_type(t):
+            return db.query(TimetableEntry).filter(
+                TimetableEntry.session_type == t
+            ).count()
 
-# ── GET /timetable/versions/{admin_id} — version list (history panel) ────────
-@router.get("/versions/{admin_id}", response_model=list)
-async def get_timetable_versions(admin_id: str):
-    """List version summaries for an admin's timetables (for History Panel)."""
-    cursor = timetables_collection.find(
-        {"admin_id": admin_id},
-        {"timetable": 0}
-    ).sort("created_at", -1)
+        lectures = count_type(SessionType.LECTURE)
+        tutorials = count_type(SessionType.TUTORIAL)
+        labs = count_type(SessionType.LAB)
+        seminars = count_type(SessionType.SEMINAR)
+        clubs = count_type(SessionType.CLUB)
 
-    versions = []
-    for doc in cursor:
-        created = doc.get("created_at")
-        versions.append({
-            "id":         str(doc["_id"]),
-            "version":    doc.get("version", 1),
-            "label":      doc.get("label", f"v{doc.get('version', 1)}"),
-            "branch":     doc.get("branch", ""),
-            "year":       doc.get("year", ""),
-            "section":    doc.get("section", "A"),
-            "created_at": created.isoformat() if isinstance(created, datetime) else str(created or ""),
-        })
-    return versions
+        total_subjects = db.query(Subject).filter(Subject.is_active == True).count()
+        total_branches = db.query(Branch).count()
+        total_faculty = db.query(Faculty).filter(Faculty.is_active == True).count()
+        total_classrooms = db.query(Classroom).filter(Classroom.is_active == True).count()
+        total_labrooms = db.query(LabRoom).filter(LabRoom.is_active == True).count()
 
+        slots_per_week = 42  # 6 × 7
 
-# ── DELETE /timetable/id/{timetable_id} — delete one version ─────────────────
-@router.delete("/id/{timetable_id}", status_code=status.HTTP_200_OK)
-async def delete_timetable_by_id(timetable_id: str):
-    """Delete a single timetable version by its MongoDB ID."""
-    try:
-        result = timetables_collection.delete_one({"_id": ObjectId(timetable_id)})
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid timetable ID.")
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Timetable not found.")
-    return {"message": "Timetable deleted"}
+        faculty_slots = db.query(TimetableEntry).filter(
+            TimetableEntry.faculty_id.isnot(None)
+        ).count()
+        classroom_slots = db.query(TimetableEntry).filter(
+            TimetableEntry.classroom_id.isnot(None)
+        ).count()
+        labroom_slots = db.query(TimetableEntry).filter(
+            TimetableEntry.labroom_id.isnot(None)
+        ).count()
+
+        faculty_util = min(100, (faculty_slots / (total_faculty * slots_per_week)) * 100) if total_faculty else 0
+        classroom_util = min(100, (classroom_slots / (total_classrooms * slots_per_week)) * 100) if total_classrooms else 0
+        labroom_util = min(100, (labroom_slots / (total_labrooms * slots_per_week)) * 100) if total_labrooms else 0
+
+        return ScheduleStatistics(
+            total_entries=total_entries,
+            total_subjects=total_subjects,
+            total_branches=total_branches,
+            total_faculty=total_faculty,
+            total_classrooms=total_classrooms,
+            total_labrooms=total_labrooms,
+            lectures_scheduled=lectures,
+            tutorials_scheduled=tutorials,
+            labs_scheduled=labs,
+            seminars_scheduled=seminars,
+            clubs_scheduled=clubs,
+            faculty_utilization=faculty_util,
+            classroom_utilization=classroom_util,
+            labroom_utilization=labroom_util,
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

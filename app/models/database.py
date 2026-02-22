@@ -1,66 +1,67 @@
 """
-College Timetable System — Database Collections
-Indexes are created lazily (on first connection) so the app boots even
-when MongoDB is temporarily unreachable.
+Database configuration and session management using SQLAlchemy and MySQL.
 """
 
-from pymongo import MongoClient, ASCENDING, DESCENDING
-from pymongo.collection import Collection
-from pymongo.database import Database
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.pool import QueuePool
+from typing import Generator
 import os
-import logging
 from dotenv import load_dotenv
 
 load_dotenv()
-logger = logging.getLogger(__name__)
 
-MONGODB_URI   = os.getenv("MONGODB_URI",   "mongodb://localhost:27017")
-DATABASE_NAME = os.getenv("DATABASE_NAME", "ai-timetable")
+# Database URL configuration
+DATABASE_USER = os.getenv("DB_USER", "root")
+DATABASE_PASSWORD = os.getenv("DB_PASSWORD", "Root@123")
+DATABASE_HOST = os.getenv("DB_HOST", "localhost")
+DATABASE_PORT = os.getenv("DB_PORT", "3306")
+DATABASE_NAME = os.getenv("DB_NAME", "timetable_db1")
 
-# Connection (lazy — no ping at module load time)
-client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
-db: Database = client[DATABASE_NAME]
+SQLALCHEMY_DATABASE_URL = "mysql+pymysql://root:Root%40123@localhost:3306/timetable_db1"
 
-# ── Collections ───────────────────────────────────────────────────────────────
-users_collection:           Collection = db["users"]
-timetables_collection:      Collection = db["timetables"]
-master_data_collection:     Collection = db["master_data"]
-assignment_data_collection: Collection = db["assignment_data"]
+# Create engine with connection pooling
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL,
+    poolclass=QueuePool,
+    pool_size=10,
+    max_overflow=20,
+    pool_pre_ping=True,
+    pool_recycle=3600,
+    echo=False,
+)
+
+# Create session factory
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
-def _create_indexes():
-    """Create indexes. Called once on first real DB operation, not at import time."""
+def get_db() -> Generator[Session, None, None]:
+    """
+    Dependency for getting a database session in FastAPI.
+    """
+    db = SessionLocal()
     try:
-        users_collection.create_index("email", unique=True)
-        timetables_collection.create_index("admin_id")
-        timetables_collection.create_index([
-            ("admin_id", ASCENDING),
-            ("branch",   ASCENDING),
-            ("year",     ASCENDING),
-            ("version",  DESCENDING),
-        ])
-        timetables_collection.create_index("created_at")
-
-        master_data_collection.create_index("admin_email")
-        assignment_data_collection.create_index("admin_email")
-        assignment_data_collection.create_index([
-            ("admin_email", ASCENDING),
-            ("branch",      ASCENDING),
-            ("year",        ASCENDING),
-        ])
-        logger.info("MongoDB indexes created.")
-    except Exception as exc:
-        logger.warning(f"Could not create indexes (MongoDB may be unavailable): {exc}")
+        yield db
+    finally:
+        db.close()
 
 
-# Run index creation in a background thread so startup is never blocked
-import threading
-threading.Thread(target=_create_indexes, daemon=True).start()
+def init_db():
+    """
+    Initialize database - create all tables.
+    """
+    from app.models.models import Base
+    Base.metadata.create_all(bind=engine)
 
 
-def get_db() -> Database:
-    return db
+def drop_db():
+    """
+    Drop all tables. Use with caution in production!
+    """
+    from app.models.models import Base
+    Base.metadata.drop_all(bind=engine)
 
 
 def close_db():
-    client.close()
+    """Close database connection pool."""
+    engine.dispose()

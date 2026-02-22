@@ -1,5 +1,6 @@
 """
-College Timetable Generator — FastAPI Application
+Main FastAPI application
+AI Timetable Generator Backend
 """
 
 from fastapi import FastAPI
@@ -7,18 +8,33 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import os
 from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 
-from app.routes import auth, profiles, timetables, export
-from app.routes import upload_master, upload_assignment
+from app.routes import timetables, upload
+from app.models.database import init_db
 
 load_dotenv()
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown events."""
+    # Startup
+    print("Initializing database...")
+    init_db()
+    print("Database initialized successfully!")
+    yield
+    # Shutdown
+    print("Shutting down...")
+
+
 app = FastAPI(
-    title="College Timetable Generator",
-    description="Smart Dynamic Timetable Generator powered by OR-Tools CP-SAT",
-    version="2.0.0"
+    title="AI Timetable Generator",
+    description="Production-grade constraint-based scheduler for college timetables",
+    version="1.0.0",
+    lifespan=lifespan
 )
 
+# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,44 +43,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Routers
-app.include_router(auth.router)
-app.include_router(profiles.router)
+
+# Include routers
 app.include_router(timetables.router)
-app.include_router(export.router)
-app.include_router(upload_master.router)
-app.include_router(upload_assignment.router)
+app.include_router(upload.router)
 
 
+# Health check endpoint
 @app.get("/health")
 async def health_check():
-    return {"status": "OK", "message": "College Timetable Generator is running"}
+    """Health check endpoint"""
+    return {
+        "status": "OK",
+        "message": "AI Timetable Generator Backend is running"
+    }
 
 
+# Root endpoint
 @app.get("/")
 async def root():
+    """Root endpoint with API info"""
     return {
-        "name": "College Timetable Generator",
-        "version": "2.0.0",
+        "name": "AI Timetable Generator",
+        "version": "1.0.0",
+        "description": "Production-grade constraint-based scheduler for college timetables",
         "endpoints": {
-            "health":                          "/health",
-            "auth":                            "/api/auth/login",
-            "profiles":                        "/api/profiles",
-            "upload_master":                   "/api/upload/master",
-            "upload_assignment":               "/api/upload/assignment",
-            "generate_timetable":              "POST /timetable/generate",
-            "get_all_timetables":              "GET  /timetable",
-            "get_by_branch_year_section":      "GET  /timetable/{branch}/{year}/{section}",
-            "clear_all_timetables":            "DELETE /timetable/clear",
-            "export":                          "/api/export",
-            "docs":                            "/docs",
+            "health": "/health",
+            "generate_timetable": "POST /api/timetable/generate",
+            "get_timetable": "GET /api/timetable",
+            "get_branch_timetable": "GET /api/timetable/{branch_code}/{year}/{section}",
+            "validate": "POST /api/timetable/validate",
+            "statistics": "GET /api/timetable/statistics",
+            "clear": "DELETE /api/timetable/clear",
+            "docs": "/docs",
+            "openapi": "/openapi.json"
         }
     }
 
 
+# 404 handler
 @app.exception_handler(404)
 async def not_found_handler(request, exc):
-    return JSONResponse(status_code=404, content={"detail": "Endpoint not found"})
+    return JSONResponse(
+        status_code=404,
+        content={"detail": "Endpoint not found"}
+    )
 
 
 if __name__ == "__main__":
