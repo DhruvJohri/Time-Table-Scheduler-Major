@@ -6,6 +6,7 @@ from typing import Optional, List
 from datetime import datetime
 from pydantic import BaseModel, Field, validator
 from enum import Enum
+from typing import Tuple
 
 
 class DayOfWeekEnum(str, Enum):
@@ -164,7 +165,7 @@ class SubjectBase(BaseModel):
     tutorials_per_week: int = Field(default=0, ge=0)
     lab_periods_per_week: int = Field(default=0, ge=0)
     seminar_periods_per_week: int = Field(default=0, ge=0)
-    lab_duration: int = Field(default=2, ge=2, le=3)
+    lab_duration: int = Field(default=2, ge=2, le=2)
     faculty_id: int
     classroom_id: Optional[int] = None
     labroom_id: Optional[int] = None
@@ -202,8 +203,8 @@ class TimetableEntryBase(BaseModel):
     period_number: int = Field(..., ge=1, le=7)
     branch_id: int
     year_section_id: int
-    subject_id: int
-    faculty_id: int
+    subject_id: Optional[int] = None
+    faculty_id: Optional[int] = None    
     classroom_id: Optional[int] = None
     labroom_id: Optional[int] = None
     session_type: SessionTypeEnum
@@ -261,8 +262,8 @@ class ScheduleGenerationResponse(BaseModel):
     message: str
     generation_time_ms: Optional[int] = None
     conflict_count: int = 0
-    unallocated_subjects: int = 0
-    failed_subjects: Optional[List[str]] = None
+    unallocated_subjects_count: int = 0
+    failed_subjects: Optional[List[Tuple[str, str]]] = None
     capacity: Optional[int] = None
     demand: Optional[int] = None
     expected_empty: Optional[int] = None

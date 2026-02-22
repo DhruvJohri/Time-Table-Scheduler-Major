@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from app.routes import timetables, upload
 from app.models.database import init_db
 
+
 load_dotenv()
 
 @asynccontextmanager
@@ -57,7 +58,12 @@ async def health_check():
         "status": "OK",
         "message": "AI Timetable Generator Backend is running"
     }
-
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal Server Error"}
+    )
 
 # Root endpoint
 @app.get("/")

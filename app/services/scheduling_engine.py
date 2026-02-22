@@ -43,6 +43,11 @@ class SchedulerEngine:
     ]
     
     PERIODS = list(range(1, 8))  # 1-7
+
+    # ADDED CONSTRAINT: Valid tutorial periods restricted to P3–P6.
+    # P1 and P2 are lecture-only (tea break follows P2, lunch follows P4).
+    # P7 on Thursday is the club slot. Tutorials must not use P1, P2, or Thursday P7.
+    TUTORIAL_VALID_PERIODS = [3, 4, 5, 6]
     
     def __init__(self, db: Session, seed: Optional[int] = None):
         self.db = db
@@ -56,7 +61,7 @@ class SchedulerEngine:
         self.failed_subjects: List[Tuple[str, str]] = []  # (subject_code, reason)
         self.backtrack_count = 0
     
-    def schedule_all(self, force_clear: bool = False) -> Tuple[bool, Dict]:
+    def schedule_all(self, force_clear: bool = False, include_clubs: bool = True) -> Tuple[bool, Dict]:
         """
         Schedule all subjects in the database.
         
@@ -83,9 +88,27 @@ class SchedulerEngine:
             periods_per_day = 7
 
         days_count = len(self.DAYS)
-        # Reserved club slots per section (Thursday P1 and P7)
-        reserved_per_section = 2
-        capacity = days_count * periods_per_day - reserved_per_section
+        # ADDED CONSTRAINT: Capacity calculation per section.
+        # Reserved club slots per section: Thursday P7 only (club is P7-only now,
+        # not P1 and P7 as before). Multiply reserved_per_section for all sections.
+        # We keep the variable name and structure to preserve existing capacity logic
+        # and simply update the reserved count to reflect P7-only club rule.
+        # -------------------------------
+        # ✅ FIXED: Proper capacity calculation per section
+        # -------------------------------
+
+        # Get all sections
+        sections = self.db.query(YearSection).all()
+        total_sections = len(sections)
+
+       # Each section reserves 1 slot (Thursday P7 for club) only if clubs enabled
+        reserved_total = total_sections * 1 if include_clubs else 0
+
+        # Total raw capacity across all sections
+        total_raw_capacity = total_sections * days_count * periods_per_day
+
+        # Final usable capacity
+        capacity = total_raw_capacity - reserved_total
 
         # Compute total demand (sum of required periods across subjects)
         total_demand = 0
@@ -162,16 +185,17 @@ class SchedulerEngine:
         
         for subject in subjects:
             # Labs have highest priority (priority = 3)
-            if subject.lab_periods_per_week > 0:
-                tasks.append(SchedulingTask(
-                    subject_id=subject.id,
-                    subject_code=subject.code,
-                    session_type=SessionType.LAB,
-                    count=subject.lab_periods_per_week,
-                    duration=subject.lab_duration,
-                    priority=3
-                ))
-            
+           if subject.lab_periods_per_week > 0:
+            # FORCE lab duration to 2 regardless of DB value
+            tasks.append(SchedulingTask(
+                subject_id=subject.id,
+                subject_code=subject.code,
+                session_type=SessionType.LAB,
+                count=subject.lab_periods_per_week,
+                duration=2,   # FIXED: Always 2
+                priority=3
+            ))
+                    
             # Tutorials next (priority = 2)
             if subject.tutorials_per_week > 0:
                 tasks.append(SchedulingTask(
@@ -227,6 +251,16 @@ class SchedulerEngine:
             else:
                 max_start = 6  # P3-P7 with duration 2 means max start is P6
                 start_period = random.randint(3, max_start)
+
+            # ADDED CONSTRAINT: Check has_lab_on_day before attempting to place.
+            # Only ONE lab per day per branch-year-section is allowed.
+            # Reject early if a lab already exists on this day for this section.
+            if self.validator.has_lab_on_day(
+                subject.branch_id, subject.year_section_id, day
+            ):
+                # Try another day — do not count this as a failed attempt
+                self.backtrack_count += 1
+                continue
             
             # Validate placement
             can_place, error = self.validator.can_schedule_lab(
@@ -252,12 +286,12 @@ class SchedulerEngine:
                         labroom_id=subject.labroom_id,
                         session_type=SessionType.LAB
                     )
-                    self.db.add(entry)
-                
-                scheduled += 1
-        
-        self.db.commit()
-        return scheduled == count
+                    if scheduled == count:
+                        self.db.commit()
+                        return True
+                    else:
+                        self.db.rollback()
+                        return False
     
     def _schedule_lectures(self, subject: Subject, count: int) -> bool:
         """Schedule lecture sessions with backtracking."""
@@ -320,10 +354,24 @@ class SchedulerEngine:
             attempts += 1
             
             day = random.choice(self.DAYS)
-            period = random.choice(self.PERIODS)
-            
+
+            # ADDED CONSTRAINT: Restrict tutorial period selection to valid periods only.
+            # Tutorials are NOT allowed in P1 or P2 (lecture-only / break periods).
+            # Tutorials are NOT allowed in P7 on Thursday (club slot).
+            # Random scheduling is preserved — only the pool of candidates is narrowed.
             if day == DayOfWeek.THURSDAY:
-                if period in [1, 7]:  # Clubs only
+                # ADDED CONSTRAINT: On Thursday, exclude P7 (club slot) from tutorial periods
+                valid_tutorial_periods = self.TUTORIAL_VALID_PERIODS  # [3, 4, 5, 6]
+            else:
+                # ADDED CONSTRAINT: On normal days, tutorials only in P3-P6
+                valid_tutorial_periods = self.TUTORIAL_VALID_PERIODS  # [3, 4, 5, 6]
+
+            period = random.choice(valid_tutorial_periods)
+
+            # Legacy guard kept for safety (now redundant given the pool above,
+            # but preserved as an extra safety net per the no-deletion rule)
+            if day == DayOfWeek.THURSDAY:
+                if period in [1, 7]:  # Clubs only / lecture-only periods
                     continue
             
             can_place, error = self.validator.can_schedule_lecture_or_tutorial(
@@ -332,7 +380,8 @@ class SchedulerEngine:
                 subject.faculty_id,
                 subject.classroom_id,
                 day,
-                period
+                period,
+                session_type=SessionType.TUTORIAL
             )
             
             if can_place:
@@ -399,7 +448,13 @@ class SchedulerEngine:
         return scheduled == count
     
     def schedule_clubs(self) -> bool:
-        """Schedule fixed club activities on Thursday P1 and P7."""
+        """
+        Schedule fixed club activities on Thursday P7 only.
+
+        ADDED CONSTRAINT: Club is scheduled ONLY in Thursday P7.
+        Club must NOT be scheduled in P1 (per updated is_thursday_rule_valid).
+        The P1 club entry has been removed from this method.
+        """
         try:
             # Get all branches
             branches = self.db.query(Subject.branch_id).distinct().all()
@@ -411,34 +466,35 @@ class SchedulerEngine:
                 ).all()
                 
                 for year_section in year_sections:
-                    # Club for P1
-                    entry_p1 = TimetableEntry(
-                        day_of_week=DayOfWeek.THURSDAY,
-                        period_number=1,
-                        branch_id=branch_id,
-                        year_section_id=year_section.id,
-                        subject_id=None,
-                        faculty_id=None,
-                        session_type=SessionType.CLUB
-                    )
-                    self.db.add(entry_p1)
-                    
-                    # Club for P7
-                    entry_p7 = TimetableEntry(
-                        day_of_week=DayOfWeek.THURSDAY,
-                        period_number=7,
-                        branch_id=branch_id,
-                        year_section_id=year_section.id,
-                        subject_id=None,
-                        faculty_id=None,
-                        session_type=SessionType.CLUB
-                    )
-                    self.db.add(entry_p7)
+                    # ADDED CONSTRAINT: Safety check — ensure no existing club entry
+                    # exists for this section on Thursday P7 before inserting,
+                    # to prevent partial inconsistent state on repeated calls.
+                    existing_p7 = self.db.query(TimetableEntry).filter(
+                        TimetableEntry.day_of_week == DayOfWeek.THURSDAY,
+                        TimetableEntry.period_number == 7,
+                        TimetableEntry.branch_id == branch_id,
+                        TimetableEntry.year_section_id == year_section.id,
+                        TimetableEntry.session_type == SessionType.CLUB
+                    ).first()
+
+                    if existing_p7 is None:
+                        # Club for P7 only (P1 club removed per ADDED CONSTRAINT)
+                        entry_p7 = TimetableEntry(
+                            day_of_week=DayOfWeek.THURSDAY,
+                            period_number=7,
+                            branch_id=branch_id,
+                            year_section_id=year_section.id,
+                            subject_id=None,
+                            faculty_id=None,
+                            session_type=SessionType.CLUB
+                        )
+                        self.db.add(entry_p7)
             
             self.db.commit()
             return True
         except Exception as e:
             logger.error(f"Error scheduling clubs: {str(e)}")
+            self.db.rollback()  # ADDED CONSTRAINT: rollback on error to prevent partial state
             return False
     
     def get_scheduling_report(self) -> Dict:

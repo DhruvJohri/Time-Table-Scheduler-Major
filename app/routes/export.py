@@ -11,17 +11,32 @@ import json
 from datetime import datetime
 from app.models.database import timetables_collection
 import os
-
+from bson.errors import InvalidId
+import html
 router = APIRouter(prefix="/api/export", tags=["export"])
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
+def _sanitize_csv(value: str) -> str:
+    if isinstance(value, str) and value.startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
 
+
+def _validate_object_id(timetable_id: str):
+    try:
+        return ObjectId(timetable_id)
+    except InvalidId:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid timetable ID format"
+        )
 @router.get("/{timetable_id}/json")
 async def export_json(timetable_id: str):
     """Export timetable as JSON"""
     try:
-        timetable = timetables_collection.find_one({"_id": ObjectId(timetable_id)})
+        obj_id = _validate_object_id(timetable_id)
+        timetable = timetables_collection.find_one({"_id": obj_id})
         if not timetable:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -57,7 +72,8 @@ async def export_json(timetable_id: str):
 async def export_csv(timetable_id: str):
     """Export timetable as CSV"""
     try:
-        timetable = timetables_collection.find_one({"_id": ObjectId(timetable_id)})
+        obj_id = _validate_object_id(timetable_id)
+        timetable = timetables_collection.find_one({"_id": obj_id})
         if not timetable:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -82,11 +98,11 @@ async def export_csv(timetable_id: str):
         # Write blocks
         for block in blocks:
             writer.writerow([
-                block.get("start", ""),
-                block.get("end", ""),
-                block.get("type", ""),
-                block.get("subject", block.get("title", "")),
-                block.get("description", "")
+                _sanitize_csv(block.get("start", "")),
+                _sanitize_csv(block.get("end", "")),
+                _sanitize_csv(block.get("type", "")),
+                _sanitize_csv(block.get("subject", block.get("title", ""))),
+                _sanitize_csv(block.get("description", ""))
             ])
 
         csv_content = output.getvalue()
@@ -110,7 +126,8 @@ async def export_csv(timetable_id: str):
 async def export_pdf(timetable_id: str):
     """Export timetable as HTML (for PDF conversion on client)"""
     try:
-        timetable = timetables_collection.find_one({"_id": ObjectId(timetable_id)})
+        obj_id = _validate_object_id(timetable_id)
+        timetable = timetables_collection.find_one({"_id": obj_id})
         if not timetable:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -138,7 +155,8 @@ async def export_pdf(timetable_id: str):
 async def get_share_link(timetable_id: str):
     """Generate shareable link"""
     try:
-        timetable = timetables_collection.find_one({"_id": ObjectId(timetable_id)})
+        obj_id = _validate_object_id(timetable_id)
+        timetable = timetables_collection.find_one({"_id": obj_id})
         if not timetable:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -162,7 +180,14 @@ async def get_share_link(timetable_id: str):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         )
-
+def _validate_object_id(timetable_id: str):
+    try:
+        return ObjectId(timetable_id)
+    except InvalidId:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid timetable ID format"
+        )
 
 def _generate_html_timetable(timetable: dict) -> str:
     """Generate HTML representation of timetable"""
@@ -179,14 +204,14 @@ def _generate_html_timetable(timetable: dict) -> str:
     blocks_html = ""
     for block in blocks:
         blocks_html += f"""
-        <tr>
-            <td>{block.get('start', '')}</td>
-            <td>{block.get('end', '')}</td>
-            <td>{block.get('type', '')}</td>
-            <td>{block.get('subject', block.get('title', ''))}</td>
-            <td>{block.get('description', '')}</td>
-        </tr>
-        """
+    <tr>
+        <td>{html.escape(str(block.get('start', '')))}</td>
+        <td>{html.escape(str(block.get('end', '')))}</td>
+        <td>{html.escape(str(block.get('type', '')))}</td>
+        <td>{html.escape(str(block.get('subject', block.get('title', ''))))}</td>
+        <td>{html.escape(str(block.get('description', '')))}</td>
+    </tr>
+    """ 
 
     html = f"""
     <!DOCTYPE html>

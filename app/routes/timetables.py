@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime
 from typing import Dict, List
-
+from sqlalchemy.orm import joinedload
 from app.models.database import get_db
 from app.models.models import (
     TimetableEntry,
@@ -51,12 +51,15 @@ async def generate_timetable(
     try:
         scheduler = SchedulerEngine(db, seed=request.seed)
 
-        # ALWAYS clear existing timetable
-        db.query(TimetableEntry).delete()
-        db.commit()
+        # # ALWAYS clear existing timetable
+        # db.query(TimetableEntry).delete()
+        # db.commit()
 
         # Run scheduler
-        success, report = scheduler.schedule_all()
+        success, report = scheduler.schedule_all(
+            force_clear=True,
+            include_clubs=request.include_clubs
+        )
 
         # Clubs optional
         if request.include_clubs:
@@ -68,15 +71,17 @@ async def generate_timetable(
 
         # Compute final success
         success = success and is_valid
-
+        # Clear old metadata (keep only latest generation)
+        db.query(ScheduleMetadata).delete()
+        db.commit()
         # Save metadata
         metadata = ScheduleMetadata(
             generated_at=datetime.utcnow(),
-            generation_seed=request.seed,
+            generation_seed=request.seed,   
             generation_time_ms=report.get("generation_time_ms", 0),
             is_valid=success,
             conflict_count=len(conflicts),
-            unallocated_subjects_count=report.get("unallocated_count", 0),
+            unallocated_subjects_count=report.get("failed", 0),
             capacity=report.get("capacity"),
             demand=report.get("demand"),
             expected_empty=report.get("expected_empty"),
@@ -89,7 +94,7 @@ async def generate_timetable(
             message=report.get("message", "Timetable generated"),
             generation_time_ms=report.get("generation_time_ms"),
             conflict_count=len(conflicts),
-            unallocated_subjects=report.get("unallocated_count", 0),
+            unallocated_subjects_count=report.get("failed", 0),
             failed_subjects=report.get("failed_subjects", []),
             capacity=report.get("capacity"),
             demand=report.get("demand"),
@@ -109,10 +114,24 @@ async def get_full_timetable(db: Session = Depends(get_db)):
     Return all timetable entries grouped by day.
     """
     try:
-        entries = db.query(TimetableEntry).all()
+        entries = db.query(TimetableEntry).options(
+        joinedload(TimetableEntry.branch),
+        joinedload(TimetableEntry.year_section),
+        joinedload(TimetableEntry.subject),
+        joinedload(TimetableEntry.faculty),
+        joinedload(TimetableEntry.classroom),
+        joinedload(TimetableEntry.labroom),
+    ).order_by(
+        TimetableEntry.day_of_week,
+        TimetableEntry.period_number
+    ).all()
 
         if not entries:
-            return {"total_entries": 0, "days": {}}
+            return {
+                "total_entries": 0,
+                "days": {},
+                "generated_at": None
+            }
 
         timetable: Dict[str, List] = {}
 
@@ -132,11 +151,17 @@ async def get_full_timetable(db: Session = Depends(get_db)):
                     "type": e.session_type.value,
                 }
             )
+        # Get latest metadata safely
+        latest_meta = db.query(ScheduleMetadata).order_by(
+            ScheduleMetadata.generated_at.desc()
+        ).first()
+
+        generated_at = latest_meta.generated_at if latest_meta else None
 
         return {
             "total_entries": len(entries),
             "days": timetable,
-            "generated_at": entries[0].created_at,
+            "generated_at": generated_at,
         }
 
     except Exception as e:
@@ -181,6 +206,12 @@ async def get_branch_timetable(
 
         entries = (
             db.query(TimetableEntry)
+            .options(
+                joinedload(TimetableEntry.subject),
+                joinedload(TimetableEntry.faculty),
+                joinedload(TimetableEntry.classroom),
+                joinedload(TimetableEntry.labroom),
+            )
             .filter(
                 TimetableEntry.branch_id == branch.id,
                 TimetableEntry.year_section_id == ys.id,
@@ -238,10 +269,15 @@ async def get_branch_timetable_matrix(
 
         grid = {day: {p: None for p in periods} for day in days}
 
-        entries = db.query(TimetableEntry).filter(
+        entries = db.query(TimetableEntry).options(
+            joinedload(TimetableEntry.subject),
+            joinedload(TimetableEntry.faculty),
+            joinedload(TimetableEntry.classroom),
+            joinedload(TimetableEntry.labroom),
+        ).filter(
             TimetableEntry.branch_id == branch.id,
             TimetableEntry.year_section_id == ys.id,
-        )
+        ).all()
 
         for e in entries:
             grid[e.day_of_week.value][e.period_number] = {

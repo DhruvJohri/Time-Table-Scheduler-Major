@@ -5,6 +5,7 @@ Pydantic schemas for request/response validation
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List, Dict
 from datetime import datetime
+from pydantic import Field
 
 
 class Subject(BaseModel):
@@ -83,8 +84,8 @@ class TimetableSchema(BaseModel):
     user_id: str
     type: str  # daily, weekly, exam_mode, workday, weekend
     date: str
-    timetable: dict  # Can be list of DayTimetable or WeekTimetable
-    modifications: Optional[List[Dict]] = []
+    timetable: Dict  # Can be list of DayTimetable or WeekTimetable
+    modifications: Optional[List[Dict]] = Field(default_factory=list)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

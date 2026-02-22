@@ -4,7 +4,7 @@ SQLAlchemy models for the Timetable Generator system.
 
 from datetime import datetime
 from enum import Enum
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, Boolean, Text, Enum as SQLEnum, Index
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, Boolean, Text, Enum as SQLEnum, Index, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 
@@ -107,7 +107,7 @@ class Subject(Base):
     __tablename__ = "subjects"
     
     id = Column(Integer, primary_key=True, index=True)
-    code = Column(String(20), nullable=False)
+    code = Column(String(20), nullable=False, index=True)
     name = Column(String(100), nullable=False)
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
     year = Column(Integer, nullable=False)  # 1, 2, 3, 4
@@ -118,7 +118,7 @@ class Subject(Base):
     tutorials_per_week = Column(Integer, default=0)
     lab_periods_per_week = Column(Integer, default=0)  # Each lab block counts as consecutive periods
     seminar_periods_per_week = Column(Integer, default=0)
-    lab_duration = Column(Integer, default=2)  # 2 or 3 consecutive periods
+    lab_duration = Column(Integer, default=2, nullable=False)
     
     # Faculty and resource allocation
     faculty_id = Column(Integer, ForeignKey("faculty.id"), nullable=False)
@@ -162,8 +162,8 @@ class TimetableEntry(Base):
     # Assignment information
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
     year_section_id = Column(Integer, ForeignKey("year_sections.id"), nullable=False)
-    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=False)
-    faculty_id = Column(Integer, ForeignKey("faculty.id"), nullable=False)
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=True)
+    faculty_id = Column(Integer, ForeignKey("faculty.id"), nullable=True)
     
     # Room assignment
     classroom_id = Column(Integer, ForeignKey("classrooms.id"), nullable=True)
@@ -185,11 +185,20 @@ class TimetableEntry(Base):
     labroom = relationship("LabRoom", back_populates="timetable_entries")
     
     __table_args__ = (
-        Index("ix_timetable_day_period_branch_year", "day_of_week", "period_number", "branch_id", "year_section_id"),
-        Index("ix_timetable_faculty_day_period", "faculty_id", "day_of_week", "period_number"),
-        Index("ix_timetable_classroom_day_period", "classroom_id", "day_of_week", "period_number"),
-        Index("ix_timetable_labroom_day_period", "labroom_id", "day_of_week", "period_number"),
-    )
+    Index("ix_timetable_day_period_branch_year", "day_of_week", "period_number", "branch_id", "year_section_id"),
+    Index("ix_timetable_faculty_day_period", "faculty_id", "day_of_week", "period_number"),
+    Index("ix_timetable_classroom_day_period", "classroom_id", "day_of_week", "period_number"),
+    Index("ix_timetable_labroom_day_period", "labroom_id", "day_of_week", "period_number"),
+
+    # 🔒 Prevent double booking of same section slot
+    UniqueConstraint(
+        "day_of_week",
+        "period_number",
+        "branch_id",
+        "year_section_id",
+        name="uq_section_slot"
+    ),
+)
 
 
 class ConstraintConfig(Base):
@@ -213,7 +222,7 @@ class ConstraintConfig(Base):
     
     # Lab constraints
     min_lab_duration = Column(Integer, default=2)  # consecutive periods
-    max_lab_duration = Column(Integer, default=3)
+    max_lab_duration = Column(Integer, default=2)
     
     # Created
     created_at = Column(DateTime, default=datetime.utcnow)
