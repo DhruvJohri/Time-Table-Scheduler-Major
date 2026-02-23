@@ -1,8 +1,9 @@
 """
 Database configuration and session management using SQLAlchemy and MySQL.
+Includes lightweight startup schema compatibility upgrades.
 """
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 from typing import Generator
@@ -52,6 +53,55 @@ def init_db():
     """
     from app.models.models import Base
     Base.metadata.create_all(bind=engine)
+    _ensure_legacy_schema_compatibility()
+
+
+def _ensure_legacy_schema_compatibility() -> None:
+    """
+    Best-effort compatibility patching for databases created by older code versions.
+    This avoids runtime 500s when new columns/enums are referenced by the API.
+    """
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+
+    with engine.begin() as conn:
+        if "timetable_entries" in table_names:
+            columns = {col["name"] for col in inspector.get_columns("timetable_entries")}
+            if "version_id" not in columns:
+                conn.execute(text("ALTER TABLE timetable_entries ADD COLUMN version_id INTEGER NULL"))
+
+            index_names = {idx["name"] for idx in inspector.get_indexes("timetable_entries")}
+            if "ix_timetable_version" not in index_names:
+                conn.execute(text("CREATE INDEX ix_timetable_version ON timetable_entries (version_id)"))
+
+            # Expand enum values for session_type if needed.
+            session_col = None
+            for col in inspector.get_columns("timetable_entries"):
+                if col.get("name") == "session_type":
+                    session_col = col
+                    break
+
+            required_session_values = {
+                "LECTURE", "TUTORIAL", "LAB", "SEMINAR", "CLUB", "BREAK", "EXTRACURRICULAR"
+            }
+            if session_col is not None:
+                current_values = set(getattr(session_col.get("type"), "enums", []) or [])
+                if current_values and not required_session_values.issubset(current_values):
+                    conn.execute(text(
+                        "ALTER TABLE timetable_entries MODIFY COLUMN session_type "
+                        "ENUM('LECTURE','TUTORIAL','LAB','SEMINAR','CLUB','BREAK','EXTRACURRICULAR') NOT NULL"
+                    ))
+
+        if "constraint_configs" in table_names:
+            cfg_columns = {col["name"] for col in inspector.get_columns("constraint_configs")}
+            if "tea_break_2_after_period" not in cfg_columns:
+                conn.execute(text(
+                    "ALTER TABLE constraint_configs ADD COLUMN tea_break_2_after_period INTEGER DEFAULT 6"
+                ))
+            if "tea_break_2_duration" not in cfg_columns:
+                conn.execute(text(
+                    "ALTER TABLE constraint_configs ADD COLUMN tea_break_2_duration INTEGER DEFAULT 15"
+                ))
 
 
 def drop_db():

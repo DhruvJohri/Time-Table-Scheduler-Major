@@ -25,6 +25,8 @@ class SessionTypeEnum(str, Enum):
     LAB = "LAB"
     SEMINAR = "SEMINAR"
     CLUB = "CLUB"
+    BREAK = "BREAK"
+    EXTRACURRICULAR = "EXTRACURRICULAR"
 
 
 # Branch Schemas
@@ -202,8 +204,9 @@ class TimetableEntryBase(BaseModel):
     period_number: int = Field(..., ge=1, le=7)
     branch_id: int
     year_section_id: int
-    subject_id: int
-    faculty_id: int
+    version_id: Optional[int] = None
+    subject_id: Optional[int] = None
+    faculty_id: Optional[int] = None
     classroom_id: Optional[int] = None
     labroom_id: Optional[int] = None
     session_type: SessionTypeEnum
@@ -254,11 +257,13 @@ class GenerateScheduleRequest(BaseModel):
     seed: Optional[int] = None
     force_regenerate: bool = False
     include_clubs: bool = True
+    fill_extracurricular: bool = True
 
 
 class ScheduleGenerationResponse(BaseModel):
     success: bool
     message: str
+    version_id: Optional[int] = None
     generation_time_ms: Optional[int] = None
     conflict_count: int = 0
     unallocated_subjects: int = 0

@@ -100,6 +100,8 @@ class SessionType(str, Enum):
     LAB = "LAB"
     SEMINAR = "SEMINAR"
     CLUB = "CLUB"
+    BREAK = "BREAK"
+    EXTRACURRICULAR = "EXTRACURRICULAR"
 
 
 class Subject(Base):
@@ -158,12 +160,14 @@ class TimetableEntry(Base):
     # Time information
     day_of_week = Column(SQLEnum(DayOfWeek), nullable=False)
     period_number = Column(Integer, nullable=False)  # 1-7
+    version_id = Column(Integer, ForeignKey("timetable_versions.id"), nullable=True)
     
     # Assignment information
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
     year_section_id = Column(Integer, ForeignKey("year_sections.id"), nullable=False)
-    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=False)
-    faculty_id = Column(Integer, ForeignKey("faculty.id"), nullable=False)
+    # Club periods may not have an academic subject/faculty assignment.
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=True)
+    faculty_id = Column(Integer, ForeignKey("faculty.id"), nullable=True)
     
     # Room assignment
     classroom_id = Column(Integer, ForeignKey("classrooms.id"), nullable=True)
@@ -183,12 +187,32 @@ class TimetableEntry(Base):
     faculty = relationship("Faculty", back_populates="timetable_entries")
     classroom = relationship("Classroom", back_populates="timetable_entries")
     labroom = relationship("LabRoom", back_populates="timetable_entries")
+    version = relationship("TimetableVersion", back_populates="entries")
     
     __table_args__ = (
         Index("ix_timetable_day_period_branch_year", "day_of_week", "period_number", "branch_id", "year_section_id"),
         Index("ix_timetable_faculty_day_period", "faculty_id", "day_of_week", "period_number"),
         Index("ix_timetable_classroom_day_period", "classroom_id", "day_of_week", "period_number"),
         Index("ix_timetable_labroom_day_period", "labroom_id", "day_of_week", "period_number"),
+        Index("ix_timetable_version", "version_id"),
+    )
+
+
+class TimetableVersion(Base):
+    """A generated timetable snapshot; only one version is active at a time."""
+    __tablename__ = "timetable_versions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    is_active = Column(Boolean, default=False, nullable=False)
+    source = Column(String(50), nullable=True)  # generated, manual, import-sync
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    entries = relationship("TimetableEntry", back_populates="version")
+
+    __table_args__ = (
+        Index("ix_timetable_versions_active", "is_active"),
+        Index("ix_timetable_versions_created_at", "created_at"),
     )
 
 
@@ -208,6 +232,8 @@ class ConstraintConfig(Base):
     # Break times
     tea_break_after_period = Column(Integer, default=2)
     tea_break_duration = Column(Integer, default=20)  # minutes
+    tea_break_2_after_period = Column(Integer, default=6)
+    tea_break_2_duration = Column(Integer, default=15)  # minutes
     lunch_after_period = Column(Integer, default=4)
     lunch_duration = Column(Integer, default=60)  # minutes
     

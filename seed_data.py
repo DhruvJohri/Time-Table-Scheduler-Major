@@ -150,7 +150,7 @@ def seed_database():
                 seminar_periods_per_week=sem,
                 lab_duration=2,
                 faculty_id=faculty.id,
-                classroom_id=classrooms["LH-201"],
+                classroom_id=classrooms["LH-201"].id,
                 labroom_id=labroom.id if labroom else None
             )
             db.add(subject)
@@ -189,6 +189,8 @@ def seed_database():
             thursday_period_duration=50,
             tea_break_after_period=2,
             tea_break_duration=20,
+            tea_break_2_after_period=6,
+            tea_break_2_duration=15,
             lunch_after_period=4,
             lunch_duration=60,
             min_lab_duration=2,
